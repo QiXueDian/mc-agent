@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MC AI Agent</title>
+  <style>
+    /* ---------------- 基础样式 ---------------- */
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at 20% 0%, #1b2333 0%, #0d1017 55%, #080a0e 100%);
+      color: #e6e8ee;
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    }
+
+    .app {
+      width: min(760px, 94vw);
+      height: min(760px, 92vh);
+      display: flex;
+      flex-direction: column;
+      background: rgba(20, 24, 33, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+      overflow: hidden;
+    }
+
+    /* ---------------- 头部 ---------------- */
+    header {
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+
+    #status {
+      margin-left: auto;
+      font-size: 12px;
+      color: #8b93a7;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4caf50;
+      box-shadow: 0 0 8px #4caf50;
+    }
+
+    .dot.busy {
+      background: #f9ab00;
+      box-shadow: 0 0 8px #f9ab00;
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse { 50% { opacity: 0.35; } }
+
+    /* ---------------- 消息区 ---------------- */
+    #log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      scroll-behavior: smooth;
+    }
+
+    #log::-webkit-scrollbar { width: 8px; }
+    #log::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 4px;
+    }
+
+    .empty-hint {
+      margin: auto;
+      color: #5f6779;
+      font-size: 13px;
+      text-align: center;
+      line-height: 1.9;
+    }
+
+    .msg {
+      border-left: 3px solid #3c4250;
+      background: rgba(255, 255, 255, 0.035);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 14px;
+      line-height: 1.65;
+      animation: fadeIn 0.18s ease-out;
+      word-break: break-word;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .msg .label {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-right: 6px;
+      white-space: nowrap;
+    }
+
+    .msg .text { white-space: pre-wrap; }
+
+    /* 各类型配色 */
+    .msg.thought   { border-left-color: #8ab4f8; }
+    .msg.thought   .label { color: #8ab4f8; }
+
+    .msg.action    { border-left-color: #f9ab00; background: rgba(249, 171, 0, 0.08); }
+    .msg.action    .label { color: #f9ab00; }
+    .msg.action    .text  { font-family: Consolas, "Courier New", monospace; font-size: 13px; }
+
+    .msg.observe   { border-left-color: #81c995; background: rgba(129, 201, 149, 0.07); }
+    .msg.observe   .label { color: #81c995; }
+    .msg.observe   .text  { font-family: Consolas, "Courier New", monospace; font-size: 13px; }
+
+    .msg.warn      { border-left-color: #fdd663; }
+    .msg.warn      .label { color: #fdd663; }
+
+    .msg.error     { border-left-color: #f28b82; background: rgba(242, 139, 130, 0.09); }
+    .msg.error     .label { color: #f28b82; }
+
+    .msg.done {
+      border-left-color: #6dd58c;
+      background: rgba(109, 213, 140, 0.11);
+      font-size: 15px;
+    }
+    .msg.done .label { color: #6dd58c; }
+
+    .msg.start { border-left-color: #5f6779; color: #b6bdc9; }
+
+    /* 步骤分隔线 */
+    .step-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #5f6779;
+      font-size: 12px;
+      margin: 4px 0 0;
+    }
+    .step-line::before,
+    .step-line::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    /* ---------------- 输入区 ---------------- */
+    footer {
+      padding: 12px 14px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      display: flex;
+      gap: 10px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    #input {
+      flex: 1;
+      padding: 11px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(0, 0, 0, 0.35);
+      color: #e6e8ee;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    #input:focus { border-color: #8ab4f8; }
+    #input::placeholder { color: #5f6779; }
+
+    #send {
+      padding: 11px 20px;
+      border: none;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #4f8cff, #2f6bd8);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+
+    #send:hover:not(:disabled) { transform: translateY(-1px); }
+    #send:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>⛏️ Minecraft AI Agent</h1>
+      <div id="status"><span class="dot" id="dot"></span><span id="statusText">空闲</span></div>
+    </header>
+
+    <div id="log">
+      <div class="empty-hint" id="emptyHint">
+        输入一句指令，例如：帮我挖个木头，然后告诉我你在哪里
+      </div>
+    </div>
+
+    <footer>
+      <input id="input" type="text" placeholder="想让我做什么？" autocomplete="off" />
+      <button id="send">发送</button>
+    </footer>
+  </div>
+
+  <script>
+    // ==================== DOM 引用 ====================
+    const logEl = document.getElementById('log')
+    const inputEl = document.getElementById('input')
+    const sendBtn = document.getElementById('send')
+    const statusText = document.getElementById('statusText')
+    const dot = document.getElementById('dot')
+    const emptyHint = document.getElementById('emptyHint')
+
+    // ==================== 状态 ====================
+    let eventSource = null // 当前 SSE 连接
+    let busy = false // 是否正在执行任务（防止重复点击）
+    const renderQueue = [] // 打字机渲染队列
+    let rendering = false // 队列是否正在消费
+    const TYPE_SPEED = 12 // 每个字符的间隔（毫秒），越小越快
+
+    // 不同类型 -> 前缀与样式类
+    const TYPE_MAP = {
+      start: { label: '📨 指令', cls: 'start' },
+      thought: { label: '🧠 思考', cls: 'thought' },
+      action: { label: '🤖 动作', cls: 'action' },
+      observe: { label: '👀 观察', cls: 'observe' },
+      warn: { label: '⚠️ 警告', cls: 'warn' },
+      error: { label: '❌ 错误', cls: 'error' },
+      done: { label: '✅ 最终回复', cls: 'done' }
+    }
+
+    // ==================== 工具函数 ====================
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+    function scrollToBottom() {
+      logEl.scrollTop = logEl.scrollHeight
+    }
+
+    function setBusy(next) {
+      busy = next
+      sendBtn.disabled = next
+      sendBtn.textContent = next ? '执行中…' : '发送'
+      statusText.textContent = next ? '思考中' : '空闲'
+      dot.classList.toggle('busy', next)
+    }
+
+    /**
+     * 创建一条消息气泡（先空文本，由打字机填充）
+     * @param {string} type start/thought/action/observe/warn/error/done
+     * @returns {{wrap: HTMLElement, textEl: HTMLElement}}
+     */
+    function createBubble(type) {
+      const meta = TYPE_MAP[type] || { label: 'ℹ️ 信息', cls: '' }
+      const wrap = document.createElement('div')
+      wrap.className = `msg ${meta.cls}`
+
+      const label = document.createElement('span')
+      label.className = 'label'
+      label.textContent = meta.label + ':'
+
+      const textEl = document.createElement('span')
+      textEl.className = 'text'
+
+      wrap.appendChild(label)
+      wrap.appendChild(textEl)
+      logEl.appendChild(wrap)
+      scrollToBottom()
+      return { wrap, textEl }
+    }
+
+    /** 在消息区插入一条“第 N/M 步”分隔线 */
+    function createStepLine(text) {
+      const line = document.createElement('div')
+      line.className = 'step-line'
+      line.textContent = text
+      logEl.appendChild(line)
+      scrollToBottom()
+    }
+
+    /**
+     * 打字机效果：把 text 逐字写入元素
+     * 用 textContent 拼字符串（不用 innerHTML），避免 XSS。
+     */
+    async function typeText(textEl, text) {
+      const content = String(text ?? '')
+      for (let i = 0; i < content.length; i++) {
+        textEl.textContent += content[i]
+        // 每 3 个字滚动一次，避免长文本时频繁重排
+        if (i % 3 === 0) scrollToBottom()
+        await sleep(TYPE_SPEED)
+      }
+      scrollToBottom()
+    }
+
+    /** 消费渲染队列：保证消息按到达顺序逐条“打”出来 */
+    async function drainQueue() {
+      if (rendering) return
+      rendering = true
+      while (renderQueue.length > 0) {
+        const job = renderQueue.shift()
+        try {
+          if (job.kind === 'step') {
+            createStepLine(job.text)
+            await sleep(120)
+          } else {
+            const { textEl } = createBubble(job.type)
+            await typeText(textEl, job.text)
+            await sleep(180)
+          }
+        } catch (err) {
+          console.error('渲染失败', err)
+        }
+      }
+      rendering = false
+    }
+
+    /** 入队一条待渲染内容 */
+    function enqueue(job) {
+      renderQueue.push(job)
+      drainQueue()
+    }
+
+    // ==================== 发送指令 ====================
+    function sendMessage() {
+      const message = inputEl.value.trim()
+      if (!message || busy) return
+
+      if (emptyHint && emptyHint.parentNode) emptyHint.remove()
+
+      // 上一轮可能还残留连接，先关掉
+      if (eventSource) {
+        eventSource.close()
+        eventSource = null
+      }
+
+      inputEl.value = ''
+      setBusy(true)
+
+      // 关键：EventSource 只能 GET，参数必须放在 query 里并做 URL 编码
+      const url = '/api/agent?message=' + encodeURIComponent(message)
+      eventSource = new EventSource(url)
+
+      // 收到任意一条 SSE 消息（服务端格式：data: {...}\n\n）
+      eventSource.onmessage = (event) => {
+        let payload
+        try {
+          payload = JSON.parse(event.data)
+        } catch (err) {
+          // 服务端可能发来心跳或非 JSON 数据，忽略即可
+          console.warn('无法解析 SSE 数据：', event.data)
+          return
+        }
+
+        const type = payload.type || 'info'
+
+        // 步骤分隔线：单独处理，不参与打字机
+        if (type === 'step') {
+          enqueue({ kind: 'step', text: payload.text })
+          return
+        }
+
+        // 普通消息：入队做打字机渲染
+        enqueue({ kind: 'msg', type, text: payload.text })
+
+        // 任务结束：立刻关闭连接（否则 EventSource 会自动重连，导致重复执行！）
+        if (type === 'done') {
+          eventSource.close()
+          eventSource = null
+          setBusy(false)
+          inputEl.focus()
+        }
+
+        if (type === 'error') {
+          // 服务端会自己 res.end()，这里也主动关掉，避免自动重连
+          eventSource.close()
+          eventSource = null
+          setBusy(false)
+        }
+      }
+
+      // 连接异常（网络断开、服务端崩溃等）
+      eventSource.onerror = (err) => {
+        console.error('SSE 连接异常', err)
+        if (eventSource) {
+          eventSource.close()
+          eventSource = null
+        }
+        if (busy) {
+          enqueue({ kind: 'msg', type: 'error', text: '连接中断，请检查后端服务是否在运行' })
+          setBusy(false)
+        }
+      }
+    }
+
+    // ==================== 事件绑定 ====================
+    sendBtn.addEventListener('click', sendMessage)
+    inputEl.addEventListener('keydown', (e) => {
+      // Enter 发送，Shift+Enter 换行（虽然这里是单行输入框）
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault()
+        sendMessage()
+      }
+    })
+
+    inputEl.focus()
+  </script>
+</body>
+</html>

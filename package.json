@@ -1,0 +1,24 @@
+{
+  "name": "mc-agent-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minecraft AI Agent：Mineflayer 机器人 + DeepSeek 工具调用 + SSE Web 界面",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "server": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "cli": "node src/brain.js",
+    "script": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mineflayer": "^4.20.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "openai": "^4.104.0"
+  }
+}
