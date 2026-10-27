@@ -29,7 +29,16 @@ const OpenAI = require('openai')
 
 const { toolDefinitions, executeTool } = require('./tools')
 const { getBot } = require('../bot/connection')
-const { log, sleep, describeError, cleanContent, hasSpecialToken } = require('./utils')
+const {
+  log,
+  sleep,
+  describeError,
+  cleanContent,
+  hasSpecialToken,
+  DSML_OPEN,
+  DSML_CLOSE,
+  DSML_TEXT_RE
+} = require('./utils')
 
 // ------------------------------ 1. 配置 ------------------------------
 const AI_CONFIG = {
@@ -51,6 +60,42 @@ const GUARD_BREAK_AT = 3
 const LOOP_WARNING_TEXT =
   '⚠️ 你似乎陷入了死循环：刚才已经用完全相同的参数调用过这个工具。' +
   '请不要重复调用相同的工具，先调用 get_status 检查背包和坐标，或者直接向用户汇报当前进展。'
+
+// ------------------------------ 1.1 伪工具调用（DSML/XML）防御 ------------------------------
+/**
+ * 畸形工具调用特征。
+ * 有些模型会把内部方言写进正文，例如：
+ *   <||invoke name="craft_item"><||parameter name="item_name">crafting_table</||parameter></||invoke>
+ *   < | | calls> / <| |invoke> / < | | tool_calls> / function_call:
+ * 这类文本绝不能当成最终答复，否则用户会看到一坨乱码，任务也真的没执行。
+ *
+ * 直接复用 utils.js 的 DSML 词法：门禁判据与清洗判据必须是同一套，
+ * 否则会出现「洗得掉但识别不出」或「识别得出但洗不掉」的半吊子状态。
+ */
+const MALFORMED_TOOL_RE = DSML_TEXT_RE
+
+/** 格式错误时注入给模型的纠错提示（role: user，兼容性最好） */
+const TOOL_FORMAT_CORRECTION = '格式错误，请使用标准的 tool_calls 功能，不要在正文输出特殊标签。'
+
+/** 同一轮内允许的纠错次数；超过即熔断，避免把 8 步配额全耗在“重写格式”上 */
+const MAX_RECOVERY = Number(process.env.MAX_RECOVERY || 2)
+
+/** 格式彻底错乱时的兜底话术（前端 done 事件只显示这一句） */
+const FORMAT_BREAK_TEXT = '（系统提示：AI 格式错乱，已强制中断任务，请重试或换一种指令方式）'
+
+/** 收尾请求前的硬约束：任务已结束，只准说人话 */
+const WRAP_UP_INSTRUCTION =
+  '任务已结束，严禁输出任何 XML、特殊符号或伪工具调用，只输出纯文本总结。'
+
+/** 收尾文本仍不干净时的安全话术（绝不把脏文本塞进 done 事件） */
+const WRAP_UP_SAFE_TEXT =
+  '（系统提示：AI 收尾输出格式错乱，已丢弃原始总结。任务可能未完成，请重试或换个说法）'
+
+/** 工具白名单：抢救出来的调用必须命中这里，防止模型编造工具名 */
+const TOOL_NAME_SET = new Set(toolDefinitions.map((def) => def.function.name))
+
+/** 工具参数 schema：用于校验抢救出来的参数，校验不过一律当解析失败 */
+const TOOL_SCHEMA_MAP = new Map(toolDefinitions.map((def) => [def.function.name, def.function.parameters]))
 
 // ------------------------------ 人格提示词 ------------------------------
 // 三个版本（worker / tsundere / chunibyo）全部放在 personas.js：
@@ -135,6 +180,217 @@ function normalizeAssistantMessage(message) {
   if (toolCalls.length > 0) assistantMessage.tool_calls = toolCalls
 
   return { assistantMessage, toolCalls }
+}
+
+// ------------------------------ 3.1 伪工具调用解析（抢救逻辑） ------------------------------
+/** 正文里是否混入了伪工具调用（开放标签也算） */
+function looksLikeToolText(text) {
+  if (typeof text !== 'string' || text === '') return false
+  return MALFORMED_TOOL_RE.test(text)
+}
+
+/** 把 XML 风格的值转成 JSON 可用类型：数字 / 布尔 / 对象数组 / 字符串 */
+function coerceScalar(raw) {
+  const text = String(raw ?? '').trim()
+  if (text === '') return ''
+  if (/^(true|false)$/i.test(text)) return text.toLowerCase() === 'true'
+  if (/^-?\d+$/.test(text)) return Number.parseInt(text, 10)
+  if (/^-?\d*\.\d+$/.test(text)) return Number.parseFloat(text)
+  if (/^[[{][\s\S]*[\]}]$/.test(text)) {
+    try {
+      return JSON.parse(text)
+    } catch (_) {
+      return text
+    }
+  }
+  return text
+}
+
+/**
+ * name="x" 的通用写法：容忍属性顺序、单/双/全角引号、引号缺失、任意空白。
+ * 由 DSML_OPEN 统一提供“标签头 + 竖线空白容忍”，这里只管属性部分。
+ */
+const DSML_NAME_ATTR = '[^<>]{0,120}?name\\s*=\\s*["\'“”]?([A-Za-z0-9_]+)["\'“”]?'
+
+/** 成对的 < | | parameter name="x">value< / | | parameter> */
+const PARAM_CLOSED_RE = new RegExp(
+  `${DSML_OPEN}parameter\\b${DSML_NAME_ATTR}[^<>]{0,80}>([\\s\\S]*?)${DSML_CLOSE}parameter\\b[^<>]{0,120}>`,
+  'gi'
+)
+
+/** 未闭合的 < | | parameter name="x">value（模型输出被截断） */
+const PARAM_LOOSE_RE = new RegExp(
+  `${DSML_OPEN}parameter\\b${DSML_NAME_ATTR}[^<>]{0,80}>([^<]*)`,
+  'gi'
+)
+
+/** invoke 开标签的切分点：< | | invoke name= */
+const INVOKE_SPLIT_RE = new RegExp(`${DSML_OPEN}invoke\\b[^<>]{0,120}?name\\s*=\\s*`, 'i')
+
+/** 解析一个 invoke 体内的全部 parameter */
+function parseParameterBlock(block) {
+  const args = {}
+  let match
+
+  PARAM_CLOSED_RE.lastIndex = 0
+  while ((match = PARAM_CLOSED_RE.exec(block)) !== null) {
+    args[match[1]] = coerceScalar(match[2])
+  }
+  if (Object.keys(args).length > 0) return args
+
+  // 兜底：标签没闭合（模型输出被截断）时，值取到下一个 < 或结尾
+  PARAM_LOOSE_RE.lastIndex = 0
+  while ((match = PARAM_LOOSE_RE.exec(block)) !== null) {
+    args[match[1]] = coerceScalar(match[2])
+  }
+  return args
+}
+
+/**
+ * 解析 < | | invoke name="x">…< / | | invoke> 结构。
+ * 用 split 实现，天然容忍标签未闭合；竖线之间的空白全交给 DSML_OPEN 处理。
+ */
+function parsePseudoCallsFromXml(text) {
+  const chunks = String(text).split(INVOKE_SPLIT_RE)
+  if (chunks.length < 2) return []
+
+  const calls = []
+  for (let i = 1; i < chunks.length; i++) {
+    const chunk = chunks[i]
+    const nameMatch = chunk.match(/^["'“”]?([A-Za-z0-9_]+)/)
+    if (!nameMatch) continue
+    calls.push({ name: nameMatch[1], args: parseParameterBlock(chunk) })
+  }
+  return calls
+}
+
+/**
+ * 解析 Markdown / 裸 JSON 形式的伪调用。
+ *
+ * 防误伤三重判据（缺一不可）：
+ *   1) 必须是对象，且带有 name / tool / function.name；
+ *   2) 必须同时带 arguments / parameters / args 字段 —— 纯数据展示（{"player":"Steve"}）不算调用；
+ *   3) name 必须在工具白名单里，否则整段丢弃。
+ */
+function parsePseudoCallsFromJson(text) {
+  const candidates = []
+  let match
+
+  const fence = /```(?:json)?\s*([\s\S]*?)```/gi
+  while ((match = fence.exec(text)) !== null) candidates.push(match[1])
+
+  const trimmed = String(text).trim()
+  if (/^[[{]/.test(trimmed)) candidates.push(trimmed)
+
+  for (const candidate of candidates) {
+    let parsed
+    try {
+      parsed = JSON.parse(candidate.trim())
+    } catch (_) {
+      continue
+    }
+
+    const list = Array.isArray(parsed) ? parsed : [parsed]
+    const calls = []
+
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+
+      const name = entry.name || entry.tool || (entry.function && entry.function.name) || ''
+
+      // 没有工具名 → 这是普通数据，跳过（不能因为一段 JSON 就执行动作）
+      if (typeof name !== 'string' || name === '') continue
+
+      // 有工具名但不在白名单 → 整段丢弃（模型可能在编造工具）
+      if (!TOOL_NAME_SET.has(name)) return []
+
+      const rawArgs = entry.arguments ?? entry.parameters ?? entry.args ?? (entry.function && entry.function.arguments)
+      if (rawArgs === undefined) continue // 没有参数载荷，按数据展示处理
+
+      let args = rawArgs
+      if (typeof args === 'string') {
+        try {
+          args = JSON.parse(args)
+        } catch (_) {
+          args = {}
+        }
+      }
+      calls.push({ name, args: args && typeof args === 'object' ? args : {} })
+    }
+
+    if (calls.length > 0) return calls
+  }
+
+  return []
+}
+
+/** 用工具自带的 JSON Schema 校验参数；返回错误文本，通过则返回 null */
+function validateArgsAgainstSchema(name, args) {
+  const schema = TOOL_SCHEMA_MAP.get(name)
+  if (!schema) return `未知工具 ${name}`
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return '参数必须是对象'
+
+  const props = schema.properties || {}
+  const required = schema.required || []
+
+  for (const key of required) {
+    if (!(key in args) || args[key] === undefined || args[key] === '') return `缺少必填参数 ${key}`
+  }
+
+  for (const [key, value] of Object.entries(args)) {
+    const prop = props[key]
+    if (!prop) {
+      if (schema.additionalProperties === false) return `不认识的参数 ${key}`
+      continue
+    }
+
+    const type = Array.isArray(prop.type) ? prop.type[0] : prop.type
+    const ok =
+      type === undefined ||
+      (type === 'string' && typeof value === 'string') ||
+      (type === 'integer' && Number.isInteger(value)) ||
+      (type === 'number' && typeof value === 'number' && Number.isFinite(value)) ||
+      (type === 'boolean' && typeof value === 'boolean') ||
+      (type === 'array' && Array.isArray(value)) ||
+      (type === 'object' && !!value && typeof value === 'object' && !Array.isArray(value))
+
+    if (!ok) return `参数 ${key} 类型应为 ${type}`
+    if (type === 'integer' || type === 'number') {
+      if (typeof prop.minimum === 'number' && value < prop.minimum) return `参数 ${key} 不能小于 ${prop.minimum}`
+      if (typeof prop.maximum === 'number' && value > prop.maximum) return `参数 ${key} 不能大于 ${prop.maximum}`
+    }
+  }
+
+  return null
+}
+
+/**
+ * 把正文里的伪工具调用抢救成 { name, args }[]。
+ * 返回空数组 = 抢救失败（调用方走纠错流程，绝不执行任何东西）。
+ */
+function parsePseudoToolCalls(text) {
+  if (typeof text !== 'string' || text === '') return []
+
+  // 通道一：XML/DSML 特征（有 <||invoke> 才走）
+  let candidates = looksLikeToolText(text) ? parsePseudoCallsFromXml(text) : []
+
+  // 通道二：JSON（只认“有工具名 + 有参数载荷 + 白名单命中”的结构）
+  if (candidates.length === 0) candidates = parsePseudoCallsFromJson(text)
+  if (candidates.length === 0) return []
+
+  const validated = []
+  for (const call of candidates) {
+    if (!TOOL_NAME_SET.has(call.name)) return [] // 白名单外，整段丢弃
+
+    const error = validateArgsAgainstSchema(call.name, call.args || {})
+    if (error) {
+      log('WARN', `[AGENT] 伪调用参数校验失败（${call.name}）：${error}`)
+      return []
+    }
+    validated.push({ name: call.name, args: call.args || {} })
+  }
+
+  return validated
 }
 
 // ------------------------------ 4. 多轮记忆 ------------------------------
@@ -233,10 +489,15 @@ async function runAgent(userMessage, sendSSE, options = {}) {
   let finalAnswer = ''
   let taskFinished = false
   let abortedByGuard = false
+  let abortedByFormat = false // 伪工具调用连续无法解析 → 熔断
 
   // 护栏计数器：上一次调用的指纹 + 连续重复次数（跨步累加）
   let lastSignature = null
   let repeatCount = 0
+
+  // 伪调用统计：成功抢救次数 / 解析失败次数（失败达到 MAX_RECOVERY 就停）
+  let recoveredCount = 0
+  let malformedCount = 0
 
   // ---- 4.2 步数受控的循环 ----
   for (let step = 1; step <= maxSteps; step++) {
@@ -271,7 +532,7 @@ async function runAgent(userMessage, sendSSE, options = {}) {
     }
 
     // 4.2.2 规范化响应
-    const { assistantMessage, toolCalls } = normalizeAssistantMessage(message)
+    let { assistantMessage, toolCalls } = normalizeAssistantMessage(message)
     const thought = cleanContent(message.content)
 
     if (hasSpecialToken(message.content)) {
@@ -282,8 +543,82 @@ async function runAgent(userMessage, sendSSE, options = {}) {
       tlog('THOUGHT', thought)
     }
 
+    // 4.2.2.5 伪工具调用抢救：模型把 tool_calls 写进了正文（DSML / XML / Markdown JSON）
+    //   命中后绝不能当最终答复 —— 那是“既没执行、又给用户看乱码”。
+    if (toolCalls.length === 0 && looksLikeToolText(message.content)) {
+      const recovered = parsePseudoToolCalls(message.content)
+
+      if (recovered.length > 0) {
+        recoveredCount += 1
+        toolCalls = recovered.map((call, index) => ({
+          id: `call_recovered_${step}_${index}`,
+          type: 'function',
+          function: { name: call.name, arguments: JSON.stringify(call.args) }
+        }))
+        assistantMessage.tool_calls = toolCalls
+        assistantMessage.content = '' // 不把 XML 文本回灌，避免模型自我强化
+
+        emit('warn', {
+          step,
+          text: `检测到正文里的伪工具调用，已抢救为本地执行：${toolCalls
+            .map((call) => call.function.name)
+            .join('、')}`
+        })
+        tlog(
+          'GUARD',
+          `[RECOVER] 第 ${step} 步从正文抢救出 ${toolCalls.length} 个调用（累计第 ${recoveredCount} 次抢救）`
+        )
+        tlog(
+          'DIAG',
+          `model=${AI_CONFIG.model} finish_reason=${response?.choices?.[0]?.finish_reason} ` +
+            `片段=${String(message.content || '').slice(0, 120)}`
+        )
+      } else {
+        malformedCount += 1
+        emit('warn', {
+          step,
+          text: `第 ${malformedCount}/${MAX_RECOVERY} 次工具调用格式错误，已要求模型按标准格式重写`
+        })
+        tlog(
+          'DIAG',
+          `[MALFORMED] model=${AI_CONFIG.model} finish_reason=${response?.choices?.[0]?.finish_reason} ` +
+            `片段=${String(message.content || '').slice(0, 120)}`
+        )
+
+        // 纠错提示用 user 注入；脏的 assistant 文本不进上下文（否则模型会照着抄）
+        messages.push({ role: 'user', content: TOOL_FORMAT_CORRECTION })
+
+        if (malformedCount >= MAX_RECOVERY) {
+          abortedByFormat = true
+          emit('error', { step, text: '模型连续输出畸形工具调用，已强制中断任务' })
+          break
+        }
+        continue
+      }
+    }
+
     // 4.2.3 没有工具调用 => 任务完成
     if (toolCalls.length === 0) {
+      // 最终出口校验：走到这里说明抢救没成功（或脏文本不属于可抢救形态），
+      // 但只要正文还带 DSML/伪调用特征，就绝不能当“正常回复”返回。
+      const dirtyFinal =
+        hasSpecialToken(message.content) ||
+        looksLikeToolText(message.content) ||
+        hasSpecialToken(thought) ||
+        looksLikeToolText(thought)
+
+      if (dirtyFinal) {
+        abortedByFormat = true
+        finalAnswer = FORMAT_BREAK_TEXT
+        taskFinished = true
+        emit('warn', { step, text: '最终回复仍含特殊标签/伪工具调用，已拦截，不会显示给用户' })
+        tlog(
+          'GUARD',
+          `[FINAL-GUARD] 第 ${step} 步最终回复被拦截：片段=${String(message.content || '').slice(0, 120)}`
+        )
+        break
+      }
+
       finalAnswer = thought || '（模型没有给出文本回复）'
       messages.push({ role: 'assistant', content: message.content || '' })
       taskFinished = true
@@ -383,18 +718,48 @@ async function runAgent(userMessage, sendSSE, options = {}) {
       '⚠️ 检测到模型陷入重复调用循环，已强制终止本轮任务。可以换个说法再试，或先让机器人移动到别的区域。'
   }
 
+  // ---- 4.3.5 被格式熔断：给一句人话，别让用户看到一堆标签 ----
+  if (abortedByFormat) {
+    finalAnswer = FORMAT_BREAK_TEXT
+  }
+
   // ---- 4.4 达到最大步数：警告 + 一次“只能说话”的收尾请求 ----
-  if (!taskFinished && !abortedByGuard) {
+  if (!taskFinished && !abortedByGuard && !abortedByFormat) {
     emit('warn', { text: `已达到最大步数 ${maxSteps}，任务可能未完成，正在生成总结…` })
     try {
-      // 不传 tools，模型无从产生 tool_calls，只能输出自然语言总结
+      // 第一重保险（约束注入）：不写死这条，模型会照着前面 N 轮的 DSML 上下文继续吐标签。
+      // 光靠“不传 tools”是不够的 —— 不传 tools 只禁掉了标准 tool_calls，禁不掉正文方言。
+      messages.push({ role: 'user', content: WRAP_UP_INSTRUCTION })
+
       const wrapUp = await getClient().chat.completions.create({
         model: AI_CONFIG.model,
         messages,
         temperature: AI_CONFIG.temperature
       })
-      const wrapUpText = cleanContent(wrapUp?.choices?.[0]?.message?.content)
-      if (wrapUpText) finalAnswer = wrapUpText
+
+      const rawText = String(wrapUp?.choices?.[0]?.message?.content || '')
+
+      // 第二重保险（双重校验）：
+      //   ① 原始文本里是否藏着可执行的伪工具调用 → 命中就丢弃，绝不执行；
+      //   ② 清洗后的文本是否仍有残留标签 → 命中就替换为安全话术。
+      const rescued = rawText ? parsePseudoToolCalls(rawText) : []
+      const cleaned = cleanContent(rawText)
+      const stillDirty = hasSpecialToken(cleaned) || looksLikeToolText(cleaned)
+
+      if (rescued.length > 0) {
+        tlog(
+          'GUARD',
+          `[WRAP-UP] 收尾文本含伪工具调用（${rescued.map((call) => call.name).join('、')}），已丢弃且未执行`
+        )
+        emit('warn', { text: '收尾总结仍试图调用工具，已丢弃并替换为安全提示' })
+        finalAnswer = WRAP_UP_SAFE_TEXT
+      } else if (stillDirty) {
+        tlog('GUARD', `[WRAP-UP] 收尾文本含特殊标签，已替换为安全提示：片段=${rawText.slice(0, 120)}`)
+        emit('warn', { text: '收尾总结仍含特殊标签，已替换为安全提示' })
+        finalAnswer = WRAP_UP_SAFE_TEXT
+      } else if (cleaned) {
+        finalAnswer = cleaned
+      }
     } catch (err) {
       emit('error', { text: `收尾请求失败：${describeError(err)}` })
     }
@@ -408,5 +773,9 @@ module.exports = {
   runAgent,
   SYSTEM_PROMPT,
   ACTIVE_PERSONA,
-  MAX_STEPS
+  MAX_STEPS,
+  // 以下仅用于单元测试与诊断，不要在生产代码里依赖
+  parsePseudoToolCalls,
+  looksLikeToolText,
+  validateArgsAgainstSchema
 }

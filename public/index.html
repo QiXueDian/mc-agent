@@ -21,7 +21,7 @@
 
     .app {
       width: min(760px, 94vw);
-      height: min(760px, 92vh);
+      height: min(960px, 94vh);
       display: flex;
       flex-direction: column;
       background: rgba(20, 24, 33, 0.92);
@@ -48,6 +48,24 @@
       letter-spacing: 0.3px;
     }
 
+    /* 风格选择（原生 select，不引入框架） */
+    .persona-select {
+      margin-left: 4px;
+      padding: 4px 8px;
+      max-width: 152px;
+      font-size: 12px;
+      font-family: inherit;
+      color: #c9d1e2;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      cursor: pointer;
+      outline: none;
+    }
+
+    .persona-select:hover:enabled { background: rgba(255, 255, 255, 0.09); }
+    .persona-select:disabled { opacity: 0.55; cursor: not-allowed; }
+
     #status {
       margin-left: auto;
       font-size: 12px;
@@ -72,6 +90,245 @@
     }
 
     @keyframes pulse { 50% { opacity: 0.35; } }
+
+    /* ---------------- AI 视角（prismarine-viewer iframe） ---------------- */
+    .viewer {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(0, 0, 0, 0.25);
+      flex: 0 0 auto;
+    }
+
+    .viewer-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: #8b93a7;
+    }
+
+    .viewer-bar .title { color: #cfd6e6; font-weight: 600; }
+
+    .viewer-state { margin-left: auto; }
+    .viewer-state.ok { color: #81c995; }
+    .viewer-state.fail { color: #f28b82; }
+
+    .viewer-toggle {
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+      color: #c9d1e2;
+      border-radius: 8px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .viewer-toggle:hover { background: rgba(255, 255, 255, 0.09); }
+
+    .viewer-toggle:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .viewer-body {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      max-height: 42vh;
+      background: #0a0d13;
+      overflow: hidden;
+    }
+
+    .viewer-body iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      display: block;
+    }
+
+    .viewer-mask {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 16px;
+      font-size: 13px;
+      line-height: 1.7;
+      color: #7c8598;
+      text-align: center;
+      background: rgba(8, 10, 14, 0.88);
+    }
+
+    .viewer-mask.hidden { display: none; }
+
+    .viewer-mask button {
+      border: none;
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 12px;
+      cursor: pointer;
+      background: linear-gradient(135deg, #4f8cff, #2f6bd8);
+      color: #fff;
+    }
+
+    /* ---------------- HUD：叠在 iframe 外层，模拟 MC 原生布局 ---------------- */
+    .hud {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none; /* 不挡住 iframe 的鼠标拖拽视角 */
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: #e8eefc;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      transition: opacity 0.2s;
+    }
+
+    .hud.hidden { display: none; }
+    .hud.hud-stale { opacity: 0.45; } /* 断线：保留数值只置灰 */
+
+    /* 准星 */
+    .hud-crosshair {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 16px;
+      height: 16px;
+      transform: translate(-50%, -50%);
+      opacity: 0.85;
+    }
+
+    .hud-crosshair::before,
+    .hud-crosshair::after {
+      content: '';
+      position: absolute;
+      background: #fff;
+      box-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
+    }
+
+    .hud-crosshair::before {
+      left: 50%;
+      top: 0;
+      width: 2px;
+      height: 100%;
+      transform: translateX(-50%);
+    }
+
+    .hud-crosshair::after {
+      top: 50%;
+      left: 0;
+      height: 2px;
+      width: 100%;
+      transform: translateY(-50%);
+    }
+
+    /* 左上：血量 / 饥饿 / 护甲 */
+    .hud-bars {
+      position: absolute;
+      left: 10px;
+      top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-size: 11px;
+    }
+
+    .hud-bar { display: flex; align-items: center; gap: 6px; }
+    .hud-bar .ico { width: 14px; text-align: center; }
+
+    .hud-track {
+      position: relative;
+      width: 96px;
+      height: 8px;
+      border-radius: 3px;
+      background: rgba(0, 0, 0, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      overflow: hidden;
+    }
+
+    .hud-fill { height: 100%; width: 0; transition: width 0.25s ease; }
+    .hud-fill.health { background: linear-gradient(90deg, #ff6b6b, #d32f2f); }
+    .hud-fill.food { background: linear-gradient(90deg, #d7a35a, #a56b2a); }
+    .hud-fill.armor { background: linear-gradient(90deg, #c9d3e3, #7f8ca3); }
+    .hud-num { min-width: 44px; opacity: 0.85; font-size: 10px; }
+
+    /* 右上：坐标 */
+    .hud-coords {
+      position: absolute;
+      right: 10px;
+      top: 10px;
+      font-size: 11px;
+      line-height: 1.6;
+      text-align: right;
+      opacity: 0.9;
+    }
+
+    /* 底部居中：9 格快捷栏 */
+    .hud-hotbar {
+      position: absolute;
+      left: 50%;
+      bottom: 8px;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 3px;
+      padding: 3px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    .hud-slot {
+      position: relative;
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      background: rgba(20, 24, 32, 0.72);
+      border: 2px solid rgba(255, 255, 255, 0.12);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .hud-slot.active {
+      border-color: #f2f6ff;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+    }
+
+    .hud-slot img {
+      width: 24px;
+      height: 24px;
+      image-rendering: pixelated;
+    }
+
+    .hud-slot .letter {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      background: rgba(120, 140, 180, 0.55);
+    }
+
+    .hud-slot .cnt {
+      position: absolute;
+      right: 2px;
+      bottom: 0;
+      font-size: 10px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .viewer.collapsed .viewer-body { display: none; }
+
+    @media (max-width: 900px) {
+      .viewer-body { max-height: 28vh; }
+    }
 
     /* ---------------- 消息区 ---------------- */
     #log {
@@ -150,6 +407,133 @@
 
     .msg.start { border-left-color: #5f6779; color: #b6bdc9; }
 
+    /* ==================== 合成配方图形化（Markdown 表格 → 3x3 网格） ==================== */
+    .msg .text.rich { display: block; }
+
+    /* 多个方案横向排列、放不下自动换行，避免一条回复撑满整个屏幕 */
+    .craft-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin: 10px 0 4px;
+    }
+
+    .craft-block {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+    }
+
+    .craft-caption {
+      font-size: 12px;
+      color: #9fb3c8;
+      margin-bottom: 8px;
+      white-space: pre-wrap;
+    }
+
+    .craft-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .craft-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 40px);
+      grid-template-rows: repeat(3, 40px);
+      gap: 4px;
+    }
+
+    .craft-slot {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      overflow: hidden;
+    }
+
+    /* 空位：深色透明底，不放任何内容 */
+    .craft-slot.empty {
+      background: rgba(0, 0, 0, 0.5);
+      border-color: rgba(255, 255, 255, 0.05);
+    }
+
+    .craft-slot img {
+      width: 32px;
+      height: 32px;
+      image-rendering: pixelated;
+      display: block;
+    }
+
+    /* 贴图缺失时显示的英文 ID：必须能完整折行（crafting_table 这种长词不许被裁掉） */
+    .craft-slot .slot-name {
+      display: none;
+      word-break: break-all;
+      font-size: 10px;
+      line-height: 1.1;
+      text-align: center;
+      color: #cfd8e3;
+      padding: 2px;
+    }
+
+    /* 贴图 404 时的降级：隐藏 img，露出英文 ID */
+    .craft-slot.fallback img { display: none; }
+    .craft-slot.fallback .slot-name { display: block; }
+
+    .craft-arrow {
+      font-size: 22px;
+      color: #6dd58c;
+      line-height: 1;
+    }
+
+    .craft-result .craft-slot {
+      width: 48px;
+      height: 48px;
+      background: rgba(109, 213, 140, 0.13);
+      border-color: rgba(109, 213, 140, 0.4);
+    }
+
+    .craft-result .craft-slot img {
+      width: 38px;
+      height: 38px;
+    }
+
+    /* 手机端：格子整体缩到 32px，避免三个方案挤爆或被迫纵向堆叠 */
+    @media (max-width: 720px) {
+      .craft-list { gap: 10px; }
+      .craft-block { padding: 8px 8px 10px; }
+      .craft-grid {
+        grid-template-columns: repeat(3, 32px);
+        grid-template-rows: repeat(3, 32px);
+        gap: 3px;
+      }
+      .craft-slot {
+        width: 32px;
+        height: 32px;
+      }
+      .craft-slot img {
+        width: 26px;
+        height: 26px;
+      }
+      .craft-slot .slot-name { font-size: 8px; }
+      .craft-arrow {
+        font-size: 16px;
+        padding: 0 4px;
+      }
+      .craft-result .craft-slot {
+        width: 40px;
+        height: 40px;
+      }
+      .craft-result .craft-slot img {
+        width: 32px;
+        height: 32px;
+      }
+    }
+
     /* 步骤分隔线 */
     .step-line {
       display: flex;
@@ -217,7 +601,50 @@
     <header>
       <h1>⛏️ Minecraft AI Agent</h1>
       <div id="status"><span class="dot" id="dot"></span><span id="statusText">空闲</span></div>
+      <select id="personaSelect" class="persona-select" title="切换 Agent 说话风格"></select>
     </header>
+
+    <!-- AI 第一人称视角：地址由 /api/health 下发，前端不硬编码端口 -->
+    <section id="viewer" class="viewer">
+      <div class="viewer-bar">
+        <span class="title">🎥 AI 视角</span>
+        <span id="viewerState" class="viewer-state">连接中…</span>
+        <button id="viewerMode" class="viewer-toggle" type="button" title="点击切换第一/第三人称">🎥 第一人称</button>
+        <button id="viewerToggle" class="viewer-toggle" type="button">收起</button>
+      </div>
+      <div class="viewer-body">
+        <iframe id="viewerFrame" title="AI 第一人称视角" allow="fullscreen"></iframe>
+
+        <!-- HUD 叠在画面外层：数据来自 /api/bot/hud，2 秒轮询 -->
+        <div id="hud" class="hud hidden">
+          <div class="hud-bars">
+            <div class="hud-bar">
+              <span class="ico">❤</span>
+              <div class="hud-track"><div id="hudHealth" class="hud-fill health"></div></div>
+              <span id="hudHealthNum" class="hud-num">--</span>
+            </div>
+            <div class="hud-bar">
+              <span class="ico">🍗</span>
+              <div class="hud-track"><div id="hudFood" class="hud-fill food"></div></div>
+              <span id="hudFoodNum" class="hud-num">--</span>
+            </div>
+            <div class="hud-bar">
+              <span class="ico">🛡</span>
+              <div class="hud-track"><div id="hudArmor" class="hud-fill armor"></div></div>
+              <span id="hudArmorNum" class="hud-num">--</span>
+            </div>
+          </div>
+          <div id="hudCoords" class="hud-coords">X --  Y --  Z --</div>
+          <div class="hud-crosshair"></div>
+          <div id="hudHotbar" class="hud-hotbar"></div>
+        </div>
+
+        <div id="viewerMask" class="viewer-mask">
+          <span id="viewerMaskText">正在连接 AI 视角…</span>
+          <button id="viewerRetry" type="button">重试</button>
+        </div>
+      </div>
+    </section>
 
     <div id="log">
       <div class="empty-hint" id="emptyHint">
@@ -321,6 +748,203 @@
       scrollToBottom()
     }
 
+    // ==================== 合成配方图形化（Markdown 表格 → 3x3 网格） ====================
+    /**
+     * 后端 query_game_knowledge 的输出约定（见 src/agent/tools.js）：
+     *   产出：stone_pickaxe x1（方案 1/3）
+     *   | cobblestone | cobblestone | cobblestone |
+     *   | --- | --- | --- |
+     *   | 空 | stick | 空 |
+     *   | 空 | stick | 空 |
+     *
+     * 解析规则：一行 3 列表格 + 紧跟 `| --- |` 分隔行 = 一个配方块；
+     * 产物与“方案 X”标识从上面最近的 `产出：xxx xN` 行取（取到就从正文里摘掉，改当标题）。
+     */
+    const TEXTURE_BASE = 'https://cdn.jsdelivr.net/gh/misode/mcmeta@assets/assets/minecraft/textures/'
+    const ITEM_TEXTURE_BASE = TEXTURE_BASE + 'item/'
+    const BLOCK_TEXTURE_BASE = TEXTURE_BASE + 'block/'
+    const EMPTY_CELL = '空'
+    const TABLE_SEP_RE = /^\|(\s*:?-{2,}:?\s*\|)+\s*$/
+    const PRODUCT_RE = /产出\s*[:：]\s*([A-Za-z0-9_]+)\s*[x×]\s*(\d+)/
+
+    /** 表格行 → 3 个单元格；不是合法 3 列表格行返回 null */
+    function parseTableRow(line) {
+      if (typeof line !== 'string') return null
+      const trimmed = line.trim()
+      if (trimmed.length < 2 || !trimmed.startsWith('|') || !trimmed.endsWith('|')) return null
+      if (TABLE_SEP_RE.test(trimmed)) return null
+
+      const cells = trimmed
+        .slice(1, -1)
+        .split('|')
+        .map((cell) => cell.replace(/[*`]/g, '').trim())
+
+      return cells.length === 3 ? cells : null
+    }
+
+    /** 单个格子：物品图标，加载失败降级为英文 ID 文本；“空”位只给深色底 */
+    function buildCraftSlot(name) {
+      const slot = document.createElement('div')
+      slot.className = 'craft-slot'
+
+      const clean = String(name || '').trim()
+      if (clean === '' || clean === EMPTY_CELL) {
+        slot.classList.add('empty')
+        return slot
+      }
+
+      const fallback = document.createElement('span')
+      fallback.className = 'slot-name'
+      fallback.textContent = clean
+
+      const img = document.createElement('img')
+      img.alt = clean
+      img.loading = 'lazy'
+
+      // 监听必须在赋值 src 之前挂上：命中浏览器缓存 / 立即失败时，error 可能先于监听触发。
+      // 降级顺序：item 贴图 → block 贴图（方块类物品没有 item 图，如 blackstone）→ 英文 ID 文本。
+      let triedBlockTexture = false
+      img.addEventListener('error', () => {
+        if (!triedBlockTexture) {
+          triedBlockTexture = true
+          img.src = BLOCK_TEXTURE_BASE + clean + '.png'
+          return
+        }
+        slot.classList.add('fallback') // 两张都没有（或 CDN 挂了）→ 绝不显示碎图
+      })
+
+      img.src = ITEM_TEXTURE_BASE + clean + '.png'
+
+      slot.appendChild(img)
+      slot.appendChild(fallback)
+      return slot
+    }
+
+    /** 一个配方块：标题 + 3x3 输入网格 + 箭头 + 产物 */
+    function buildCraftBlock(grid, product, caption) {
+      const block = document.createElement('div')
+      block.className = 'craft-block'
+
+      if (caption) {
+        const captionEl = document.createElement('div')
+        captionEl.className = 'craft-caption'
+        captionEl.textContent = caption
+        block.appendChild(captionEl)
+      }
+
+      const row = document.createElement('div')
+      row.className = 'craft-row'
+
+      const inputGrid = document.createElement('div')
+      inputGrid.className = 'craft-grid'
+      grid.forEach((cells) => {
+        cells.forEach((cell) => inputGrid.appendChild(buildCraftSlot(cell)))
+      })
+
+      row.appendChild(inputGrid)
+
+      if (product) {
+        const arrow = document.createElement('div')
+        arrow.className = 'craft-arrow'
+        arrow.textContent = '→'
+
+        const result = document.createElement('div')
+        result.className = 'craft-result'
+        result.appendChild(buildCraftSlot(product))
+
+        row.appendChild(arrow)
+        row.appendChild(result)
+      }
+
+      block.appendChild(row)
+      return block
+    }
+
+    /**
+     * 把气泡里的 Markdown 配方表格替换成图形 UI。
+     * 没有表格的文本原样保留（含换行），逐个文本节点重建，不用 innerHTML（防 XSS）。
+     */
+    function renderCraftBlocks(textEl, text) {
+      const content = String(text || '')
+      if (content.indexOf('|') === -1) return
+
+      const lines = content.split('\n')
+      const frag = document.createDocumentFragment()
+      let buffer = []
+      let list = null
+
+      const closeList = () => {
+        if (!list) return
+        if (list.childElementCount > 0) frag.appendChild(list)
+        list = null
+      }
+
+      // 把 buffer 里的正文吐出去；纯空白行直接丢弃（相邻方案仍留在同一个 flex 容器里）
+      // 注意顺序：先让攒好的配方块落地，再插正文 —— 否则配方会被挤到整段回复的最后。
+      const flushText = () => {
+        const meaningful = buffer.filter((line) => line.trim() !== '')
+        buffer = []
+        if (meaningful.length === 0) return
+
+        closeList()
+
+        const span = document.createElement('span')
+        span.textContent = meaningful.join('\n')
+        frag.appendChild(span)
+      }
+
+      let i = 0
+      while (i < lines.length) {
+        const header = parseTableRow(lines[i])
+        const isTableStart =
+          header && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1].trim())
+
+        if (!isTableStart) {
+          buffer.push(lines[i])
+          i += 1
+          continue
+        }
+
+        // 表头 + 最多再取 2 行数据；模型少写行时补“空”，保证恒为 3x3
+        const grid = [header]
+        i += 2
+        while (grid.length < 3 && i < lines.length) {
+          const row = parseTableRow(lines[i])
+          if (!row) break
+          grid.push(row)
+          i += 1
+        }
+        while (grid.length < 3) grid.push([EMPTY_CELL, EMPTY_CELL, EMPTY_CELL])
+
+        // 产物 & 方案标识：向上找最近的 `产出：xxx xN`，找到就从正文里摘掉
+        let caption = ''
+        let product = ''
+        for (let b = buffer.length - 1; b >= 0; b--) {
+          const match = buffer[b].match(PRODUCT_RE)
+          if (!match) continue
+          caption = buffer[b].trim()
+          product = match[1].toLowerCase()
+          buffer = buffer.slice(0, b)
+          break
+        }
+
+        flushText()
+        if (!list) {
+          list = document.createElement('div')
+          list.className = 'craft-list'
+        }
+        list.appendChild(buildCraftBlock(grid, product, caption))
+      }
+
+      flushText()
+      closeList()
+
+      textEl.textContent = ''
+      textEl.classList.add('rich')
+      textEl.appendChild(frag)
+      scrollToBottom()
+    }
+
     /** 消费渲染队列：保证消息按到达顺序逐条“打”出来 */
     async function drainQueue() {
       if (rendering) return
@@ -334,6 +958,10 @@
           } else {
             const { textEl } = createBubble(job.type)
             await typeText(textEl, job.text)
+            // 打完之后再做一次富文本化：配方表格替换成 3x3 图形网格（done / observe 才可能有表格）
+            if (job.type === 'done' || job.type === 'observe') {
+              renderCraftBlocks(textEl, job.text)
+            }
             await sleep(180)
           }
         } catch (err) {
@@ -420,6 +1048,402 @@
         }
       }
     }
+
+    // ==================== AI 视角面板 ====================
+    const viewerEl = document.getElementById('viewer')
+    const viewerFrame = document.getElementById('viewerFrame')
+    const viewerState = document.getElementById('viewerState')
+    const viewerMask = document.getElementById('viewerMask')
+    const viewerMaskText = document.getElementById('viewerMaskText')
+    const viewerRetry = document.getElementById('viewerRetry')
+    const viewerToggle = document.getElementById('viewerToggle')
+    const viewerMode = document.getElementById('viewerMode')
+
+    const VIEWER_COLLAPSED_KEY = 'mc-agent-viewer-collapsed'
+    const VIEWER_LOAD_TIMEOUT = 5000 // iframe 多久没 load 就判定未就绪
+    const VIEWER_AUTO_RETRY_MS = 10000 // 机器人还没 spawn 时的自动重试间隔
+    const VIEWER_MAX_AUTO_RETRY = 18 // 最多自动重试 18 次（约 3 分钟）
+
+    let viewerTimer = null // iframe 加载超时定时器
+    let viewerAutoTimer = null // 未就绪时的自动重试定时器
+    let viewerAutoCount = 0
+    let pendingViewerLoad = false // 只有我们自己设置了真实地址，才认 load 事件
+    let viewerFirstPerson = true // 当前视角模式（后端返回，前端只做展示与切换意图）
+
+    function setViewerState(text, state) {
+      viewerState.textContent = text
+      viewerState.className = 'viewer-state' + (state ? ' ' + state : '')
+    }
+
+    function showViewerMask(text, retryable) {
+      viewerMaskText.textContent = text
+      viewerRetry.style.display = retryable ? '' : 'none'
+      viewerMask.classList.remove('hidden')
+    }
+
+    function hideViewerMask() {
+      viewerMask.classList.add('hidden')
+    }
+
+    /** 往日志区推一条 warn（复用现有的气泡样式，不走 SSE） */
+    function pushWarn(text) {
+      const { textEl } = createBubble('warn')
+      textEl.textContent = text
+      scrollToBottom()
+    }
+
+    /** 同步“第一人称 / 第三人称”按钮文案 */
+    function applyViewerMode(firstPerson) {
+      viewerFirstPerson = !!firstPerson
+      viewerMode.style.display = '' // 禁用状态被隐藏过，启用后要恢复
+      viewerMode.textContent = viewerFirstPerson ? '🎥 第一人称' : '🎥 第三人称'
+    }
+
+    /** iframe 加载超时兜底（重启/切换后都要重新计时） */
+    function armViewerTimeout() {
+      clearTimeout(viewerTimer)
+      viewerTimer = setTimeout(() => {
+        setViewerState('加载超时', 'fail')
+        showViewerMask('AI 视角未就绪，请检查 VIEWER_PORT / VIEWER_PUBLIC_URL 配置', true)
+      }, VIEWER_LOAD_TIMEOUT)
+    }
+
+    /** 折叠状态存 localStorage，刷新后保持 */
+    function applyViewerCollapsed(collapsed) {
+      viewerEl.classList.toggle('collapsed', collapsed)
+      viewerToggle.textContent = collapsed ? '展开' : '收起'
+      if (collapsed) {
+        clearTimeout(viewerTimer)
+        clearTimeout(viewerAutoTimer)
+      }
+    }
+
+    /**
+     * 从 /api/health 拿 viewer 配置并挂到 iframe 上。
+     * 地址永远来自后端（VIEWER_PORT / VIEWER_PUBLIC_URL），前端不写死任何端口。
+     */
+    async function loadViewer() {
+      clearTimeout(viewerTimer)
+      clearTimeout(viewerAutoTimer)
+      setViewerState('连接中…', '')
+      showViewerMask('正在连接 AI 视角…', false)
+
+      let viewer = null
+      try {
+        const res = await fetch('/api/health')
+        const health = await res.json()
+        viewer = health.viewer || {}
+      } catch (err) {
+        console.error('获取 AI 视角配置失败', err)
+        setViewerState('连接失败', 'fail')
+        showViewerMask('无法获取 AI 视角配置，请检查 Agent 服务是否在运行', true)
+        return
+      }
+
+      if (!viewer.enabled) {
+        setViewerState('已禁用', 'fail')
+        showViewerMask('AI 视角已禁用（VIEWER_ENABLED=0）', false)
+        viewerMode.style.display = 'none' // 禁用时切换按钮没有意义
+        return
+      }
+
+      applyViewerMode(viewer.firstPerson)
+
+      if (!viewer.running) {
+        setViewerState('未就绪', 'fail')
+        showViewerMask(
+          'AI 视角未就绪' +
+            (viewer.lastError ? '：' + viewer.lastError : '，等机器人进入游戏后会自动重连'),
+          true
+        )
+        // 机器人还没 spawn 时自动再试几次，省得用户一直手点重试
+        if (viewerAutoCount < VIEWER_MAX_AUTO_RETRY) {
+          viewerAutoCount += 1
+          viewerAutoTimer = setTimeout(loadViewer, VIEWER_AUTO_RETRY_MS)
+        }
+        return
+      }
+
+      viewerAutoCount = 0
+      applyViewerMode(viewer.firstPerson)
+      pendingViewerLoad = true
+      viewerFrame.src = viewer.url
+
+      // 跨域 iframe 读不到内容，只能用“N 秒没 load”判断失败
+      armViewerTimeout()
+    }
+
+    viewerFrame.addEventListener('load', () => {
+      if (!pendingViewerLoad) return // 忽略 about:blank 之类的中间态
+      pendingViewerLoad = false
+      clearTimeout(viewerTimer)
+      hideViewerMask()
+      setViewerState('实时画面', 'ok')
+    })
+
+    viewerRetry.addEventListener('click', () => {
+      // 重试 = 重新拉一次 /api/health，再用最新地址重置 iframe
+      pendingViewerLoad = false
+      viewerFrame.src = 'about:blank' // 先清空，保证同一地址也会真正重载
+      viewerAutoCount = 0
+      setTimeout(loadViewer, 60)
+    })
+
+    viewerToggle.addEventListener('click', () => {
+      const collapsed = !viewerEl.classList.contains('collapsed')
+      applyViewerCollapsed(collapsed)
+      try {
+        localStorage.setItem(VIEWER_COLLAPSED_KEY, collapsed ? '1' : '0')
+      } catch (_) {
+        /* 隐私模式下写不进去，忽略 */
+      }
+
+      if (!collapsed && !viewerFrame.src) loadViewer()
+    })
+
+    /**
+     * 切换第一/第三人称。
+     * 后端只能靠“重启 viewer”实现，所以成功后 iframe 必须整页重载；
+     * 失败则回滚按钮并提示“画面保持原状”。
+     */
+    viewerMode.addEventListener('click', async () => {
+      if (viewerMode.disabled) return
+
+      const target = !viewerFirstPerson
+      const prevMode = viewerFirstPerson
+
+      viewerMode.disabled = true
+      viewerMode.textContent = '切换中…'
+      setViewerState('切换中…', '')
+
+      try {
+        const res = await fetch('/api/viewer/mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ firstPerson: target })
+        })
+        const data = await res.json().catch(() => ({}))
+
+        if (data.notice) pushWarn(data.notice)
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+
+        applyViewerMode(!!data.firstPerson)
+
+        // viewer 是重启出来的：socket 连接、世界数据全换了一套，iframe 必须整页重载
+        pendingViewerLoad = false
+        viewerFrame.src = 'about:blank'
+        setViewerState('重新连接…', '')
+        setTimeout(() => {
+          if (!data.url) return
+          pendingViewerLoad = true
+          viewerFrame.src = data.url + '?t=' + Date.now()
+          armViewerTimeout()
+        }, 120)
+
+        pushWarn(`视角已切换为${data.firstPerson ? '第一人称' : '第三人称'}，画面重新连接中…`)
+      } catch (err) {
+        applyViewerMode(prevMode) // 回滚按钮状态
+        setViewerState('切换失败', 'fail')
+        pushWarn(`切换失败，画面保持原状：${err.message}`)
+      } finally {
+        viewerMode.disabled = false
+      }
+    })
+
+    // ==================== HUD：血量 / 饥饿 / 护甲 / 快捷栏 / 坐标 ====================
+    const hudEl = document.getElementById('hud')
+    const hudHotbar = document.getElementById('hudHotbar')
+    const hudCoords = document.getElementById('hudCoords')
+    const hudHealth = document.getElementById('hudHealth')
+    const hudHealthNum = document.getElementById('hudHealthNum')
+    const hudFood = document.getElementById('hudFood')
+    const hudFoodNum = document.getElementById('hudFoodNum')
+    const hudArmor = document.getElementById('hudArmor')
+    const hudArmorNum = document.getElementById('hudArmorNum')
+
+    const HUD_INTERVAL = 2000 // 轮询间隔（毫秒）
+    const HUD_ICON_BASE = 'https://cdn.jsdelivr.net/gh/misode/mcmeta@assets/assets/minecraft/textures'
+    const hudIconFailed = new Set() // 图标彻底失败的物品名，不再重试
+    const hudSlots = []
+    let hudTimer = null
+
+    // 预建 9 个格子，轮询时只替换内容，避免每次重建 DOM
+    for (let i = 0; i < 9; i++) {
+      const slot = document.createElement('div')
+      slot.className = 'hud-slot'
+      hudHotbar.appendChild(slot)
+      hudSlots.push(slot)
+    }
+
+    /** 图标元素：先试 item/（工具、食物），失败换 block/（泥土、圆石），再失败才降级字母 */
+    function hudIconEl(item) {
+      const img = document.createElement('img')
+      img.alt = item.name
+      img.decoding = 'async'
+      img.dataset.folder = 'item'
+      img.src = `${HUD_ICON_BASE}/item/${item.name}.png`
+
+      img.addEventListener('error', () => {
+        if (img.dataset.folder === 'item') {
+          img.dataset.folder = 'block'
+          img.src = `${HUD_ICON_BASE}/block/${item.name}.png`
+          return
+        }
+        hudIconFailed.add(item.name)
+        img.replaceWith(hudLetterEl(item))
+      })
+
+      return img
+    }
+
+    /** 降级块：displayName 首字母 + 底色 */
+    function hudLetterEl(item) {
+      const letter = document.createElement('div')
+      letter.className = 'letter'
+      letter.textContent = String(item.displayName || item.name || '?')
+        .trim()
+        .charAt(0)
+        .toUpperCase()
+      return letter
+    }
+
+    function renderHudSlot(index, item, active) {
+      const slot = hudSlots[index]
+      slot.classList.toggle('active', active)
+      slot.replaceChildren()
+      if (!item) return
+
+      slot.appendChild(hudIconFailed.has(item.name) ? hudLetterEl(item) : hudIconEl(item))
+
+      if (item.count > 1) {
+        const cnt = document.createElement('span')
+        cnt.className = 'cnt'
+        cnt.textContent = item.count
+        slot.appendChild(cnt)
+      }
+    }
+
+    function setHudBar(fillEl, numEl, value, max) {
+      const safeMax = max > 0 ? max : 20
+      const pct = Math.max(0, Math.min(100, ((Number(value) || 0) / safeMax) * 100))
+      fillEl.style.width = pct + '%'
+      numEl.textContent = `${value === undefined || value === null ? '--' : value}/${safeMax}`
+    }
+
+    /** 拉一次 HUD；任何异常都静默降级（置灰），绝不往日志区刷错误 */
+    async function refreshHud() {
+      if (document.hidden) return
+
+      try {
+        const res = await fetch('/api/bot/hud')
+        const hud = await res.json()
+
+        if (!hud || !hud.ready) {
+          // 断线 / 未 spawn：保留上次数值，只置灰
+          hudEl.classList.remove('hidden')
+          hudEl.classList.add('hud-stale')
+          return
+        }
+
+        hudEl.classList.remove('hidden')
+        hudEl.classList.remove('hud-stale')
+
+        setHudBar(hudHealth, hudHealthNum, hud.health, hud.healthMax)
+        setHudBar(hudFood, hudFoodNum, hud.food, hud.foodMax)
+        setHudBar(hudArmor, hudArmorNum, hud.armor, hud.armorMax)
+
+        const pos = hud.position
+        hudCoords.textContent = pos ? `X ${pos.x}  Y ${pos.y}  Z ${pos.z}` : 'X --  Y --  Z --'
+        hudCoords.title = pos ? `维度：${pos.dimension}` : ''
+
+        const hotbar = Array.isArray(hud.hotbar) ? hud.hotbar : []
+        for (let i = 0; i < 9; i++) {
+          renderHudSlot(i, hotbar[i] || null, i === hud.quickBarSlot)
+        }
+      } catch (err) {
+        hudEl.classList.add('hud-stale')
+      }
+    }
+
+    function startHud() {
+      clearInterval(hudTimer)
+      refreshHud()
+      hudTimer = setInterval(refreshHud, HUD_INTERVAL)
+    }
+
+    // 页面切回来立刻补一次，不用等下一个 2 秒
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refreshHud()
+    })
+
+    // ==================== 风格切换（persona） ====================
+    const personaSelect = document.getElementById('personaSelect')
+
+    let currentPersonaId = ''
+    let personaSwitching = false
+
+    /** 拉一次风格列表，填充 <select> */
+    async function loadPersonas() {
+      try {
+        const res = await fetch('/api/personas')
+        const data = await res.json()
+        const list = Array.isArray(data.personas) ? data.personas : []
+
+        personaSelect.replaceChildren()
+        list.forEach((persona) => {
+          const option = document.createElement('option')
+          option.value = persona.id // id 才是后端认的键
+          option.textContent = persona.name || persona.label || persona.id
+          option.title = persona.description || ''
+          personaSelect.appendChild(option)
+        })
+
+        currentPersonaId = data.active || (list[0] ? list[0].id : '')
+        if (currentPersonaId) personaSelect.value = currentPersonaId
+      } catch (err) {
+        // 拿不到列表就禁用下拉框，别让人点了没反应
+        personaSelect.disabled = true
+        personaSelect.title = '无法获取风格列表'
+        console.error('获取风格列表失败', err)
+      }
+    }
+
+    personaSelect.addEventListener('change', async () => {
+      if (personaSwitching) return
+
+      const targetId = personaSelect.value
+      if (!targetId || targetId === currentPersonaId) return
+
+      personaSwitching = true
+      personaSelect.disabled = true
+
+      try {
+        const res = await fetch('/api/persona', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: targetId })
+        })
+        const data = await res.json().catch(() => ({}))
+
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+
+        currentPersonaId = data.active || targetId
+        pushWarn(`已切换风格：${data.name || currentPersonaId}（下一次指令生效）`)
+      } catch (err) {
+        // 失败回滚到后端当前值，不假装切换成功
+        if (currentPersonaId) personaSelect.value = currentPersonaId
+        pushWarn(`切换风格失败：${err.message}`)
+      } finally {
+        personaSelect.disabled = false
+        personaSwitching = false
+      }
+    })
+
+    // 初始化：默认展开；用户手动收起过就保持收起
+    applyViewerCollapsed(localStorage.getItem(VIEWER_COLLAPSED_KEY) === '1')
+    if (!viewerEl.classList.contains('collapsed')) loadViewer()
+    startHud()
+    loadPersonas()
 
     // ==================== 事件绑定 ====================
     sendBtn.addEventListener('click', sendMessage)

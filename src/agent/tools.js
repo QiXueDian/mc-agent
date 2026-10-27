@@ -662,6 +662,34 @@ const toolDefinitions = [
         additionalProperties: false
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'query_game_knowledge',
+      description:
+        '【游戏知识查询】查询 Minecraft 官方数据（minecraft-data）：物品属性与合成/熔炼配方。\n' +
+        '当玩家问“怎么做某物品”“某物品有什么用/能干什么”时**必须先调用本工具**，不要凭记忆回答。\n' +
+        'query_type=item 查物品属性（堆叠上限、最大耐久）；query_type=recipe 查合成配方。\n' +
+        'keyword 必须是物品的英文 ID（例如 stone_pickaxe、torch），不能填中文名。\n' +
+        '注意：recipe 返回的 3x3 表格是 Markdown 格式，最终回复里必须**原样保留**，前端会自动渲染成图形。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query_type: {
+            type: 'string',
+            enum: ['item', 'recipe'],
+            description: 'item = 查物品属性；recipe = 查合成/熔炼配方'
+          },
+          keyword: {
+            type: 'string',
+            description: '物品的英文 ID，例如 stone_pickaxe、oak_planks、torch'
+          }
+        },
+        required: ['query_type', 'keyword'],
+        additionalProperties: false
+      }
+    }
   }
 ]
 
@@ -2566,6 +2594,324 @@ async function scanEnvironment(bot, args = {}) {
   }
 }
 
+// ============================================================================
+//  游戏知识查询（query_game_knowledge）—— minecraft-data 深度集成
+// ----------------------------------------------------------------------------
+//  数据来源：require('minecraft-data')(bot.version)
+//    · 物品属性：itemsByName / blocksByName（stackSize、maxDurability）
+//    · 配方：recipes[itemId] —— 注意是**按数字 id 索引，不是按名字**
+//        shaped    → inShape 是 3x3 的数字 id 矩阵，null 表示空位
+//        shapeless → ingredients 是数字 id 数组（重复出现即表示数量）
+//    · 熔炼：minecraft-data 1.21.x 的 recipes.json 只有工作台配方，没有熔炉配方，
+//            所以用内置 SMELTING_RECIPES 兜底（常见产物）。
+//
+//  ⚠️ 本工具返回的是**严格 Markdown**：表格格子必须是英文 ID（前端据此拼贴图 URL），
+//     所以返回 { __raw: true, text }，让 executeTool 跳过 localizeText 汉化。
+// ============================================================================
+const minecraftData = require('minecraft-data')
+
+/** 单个配方最多展示几个方案（石镐有 3 种材料方案，全列会把上下文撑爆） */
+const MAX_RECIPE_VARIANTS = 3
+
+/** 熔炼表（产物 → 原料）：minecraft-data 不提供，内置常用项兜底 */
+const SMELTING_RECIPES = {
+  iron_ingot: 'raw_iron',
+  gold_ingot: 'raw_gold',
+  copper_ingot: 'raw_copper',
+  glass: 'sand',
+  stone: 'cobblestone',
+  smooth_stone: 'stone',
+  charcoal: 'oak_log',
+  brick: 'clay_ball',
+  deepslate: 'cobbled_deepslate',
+  cooked_beef: 'beef',
+  cooked_porkchop: 'porkchop',
+  cooked_chicken: 'chicken',
+  cooked_mutton: 'mutton',
+  cooked_rabbit: 'rabbit',
+  cooked_cod: 'cod',
+  cooked_salmon: 'salmon',
+  baked_potato: 'potato',
+  dried_kelp: 'kelp'
+}
+
+/** 版本 → mcData 缓存：同一版本只解析一次（数据文件不小，反复加载会明显卡顿） */
+const MC_DATA_CACHE = new Map()
+
+/** 解析当前世界版本：优先 bot.version，其次 .env 的 MC_VERSION，最后取支持的最新版 */
+function resolveGameVersion(bot) {
+  const fromBot = bot && bot.version ? String(bot.version) : ''
+  const fromEnv = process.env.MC_VERSION ? String(process.env.MC_VERSION) : ''
+  if (fromBot) return fromBot
+  if (fromEnv) return fromEnv
+  const list = (minecraftData.supportedVersions && minecraftData.supportedVersions.pc) || []
+  return list[list.length - 1] || '1.21.1'
+}
+
+/** 取指定版本的 mcData；失败返回 { error }，绝不抛异常进循环 */
+function getGameData(bot) {
+  const version = resolveGameVersion(bot)
+  if (MC_DATA_CACHE.has(version)) return MC_DATA_CACHE.get(version)
+
+  try {
+    const data = minecraftData(version)
+    MC_DATA_CACHE.set(version, data)
+    return data
+  } catch (err) {
+    const error = `加载 Minecraft ${version} 的数据失败：${describeError(err)}`
+    log('ERROR', `[tools] query_game_knowledge ${error}`)
+    return { error }
+  }
+}
+
+/**
+ * 在 mcData 里找物品/方块。
+ * 容忍：大小写、连字符/空格（stone-pickaxe）、中文名反查（“石镐”）。
+ */
+function lookupGameItem(mcData, keyword) {
+  const raw = String(keyword || '').trim()
+  if (!raw) return null
+
+  const id = raw.toLowerCase().replace(/[\s-]+/g, '_')
+  let name = id
+
+  if (!mcData.itemsByName[name] && !mcData.blocksByName[name]) {
+    // 中文名反查：玩家直接用“石镐怎么做”提问时也能命中
+    const zhHit = Object.entries(itemNameMap).find(([, zh]) => zh === raw)
+    if (!zhHit) return null
+    name = zhHit[0]
+  }
+
+  const item = mcData.itemsByName[name]
+  const block = mcData.blocksByName[name]
+  if (!item && !block) return null
+
+  // 配方按**物品 id** 索引；方块名通常也有同名物品（如 crafting_table），取不到就退回 block.id
+  const itemEntry = item || mcData.itemsByName[name] || null
+
+  return {
+    name: (item || block).name,
+    displayName: (item || block).displayName || (item || block).name,
+    itemId: itemEntry ? itemEntry.id : null,
+    stackSize: itemEntry && itemEntry.stackSize ? itemEntry.stackSize : 64,
+    maxDurability: itemEntry ? itemEntry.maxDurability : undefined
+  }
+}
+
+/** 分支 A：物品属性文本 */
+function formatItemInfo(info) {
+  const zh = itemNameMap[info.name]
+  const label = zh ? `${zh}（${info.name}）` : `${info.displayName}（${info.name}）`
+  const durability = info.maxDurability
+    ? `最大耐久：${info.maxDurability}`
+    : '最大耐久：无（该物品没有耐久度）'
+  return `物品：${label}\n最大堆叠：${info.stackSize}\n${durability}`
+}
+
+/** 3x3 有序合成表：**严格 Markdown**，第一行当表头，紧跟分隔行，空位填“空” */
+function renderShapeTable(mcData, inShape) {
+  const rows = []
+  for (let r = 0; r < 3; r++) {
+    const cells = []
+    for (let c = 0; c < 3; c++) {
+      const id = Array.isArray(inShape[r]) ? inShape[r][c] : null
+      cells.push(id == null ? '空' : (mcData.items[id] && mcData.items[id].name) || `unknown_${id}`)
+    }
+    rows.push(`| ${cells.join(' | ')} |`)
+  }
+  return [rows[0], '| --- | --- | --- |', rows[1], rows[2]].join('\n')
+}
+
+/** 无序合成材料：把重复 id 聚合成 “oak_planks x4” */
+function formatIngredients(mcData, ingredients) {
+  const counts = new Map()
+  for (const id of ingredients) {
+    const name = (mcData.items[id] && mcData.items[id].name) || `unknown_${id}`
+    counts.set(name, (counts.get(name) || 0) + 1)
+  }
+  return [...counts.entries()].map(([name, count]) => `${name} x${count}`).join(', ')
+}
+
+/** 把 inShape 摊平成 3x3（不足 3 行/列的配方补 null），长度恒为 9 */
+function flattenShape(inShape) {
+  const cells = []
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      cells.push(Array.isArray(inShape[r]) && inShape[r][c] != null ? inShape[r][c] : null)
+    }
+  }
+  return cells
+}
+
+/** 形状指纹：只看“哪几格有料”，不看具体是什么料。形状相同 = 可聚合 */
+function shapeSignature(inShape) {
+  return flattenShape(inShape)
+    .map((id) => (id == null ? '0' : '1'))
+    .join('')
+}
+
+/**
+ * 生成“可替换材料”说明（只对同一形状指纹的兄弟配方计算）。
+ *
+ * 例：木镐 12 种木板 → 表里画的是 oak_planks，说明里列出 spruce_planks 等 11 种；
+ * 石镐 3 种石料 → 表里画 cobblestone，说明里列出 cobbled_deepslate、blackstone。
+ */
+function describeSubstitutions(mcData, baseRecipe, siblings) {
+  const base = flattenShape(baseRecipe.inShape)
+  const swaps = new Map() // 原材料名 → Set(可替代材料名)
+
+  for (const recipe of siblings) {
+    const current = flattenShape(recipe.inShape)
+    for (let i = 0; i < base.length; i++) {
+      const from = base[i]
+      const to = current[i]
+      if (from == null || to == null || from === to) continue
+
+      const fromName = mcData.items[from] && mcData.items[from].name
+      const toName = mcData.items[to] && mcData.items[to].name
+      if (!fromName || !toName) continue
+
+      if (!swaps.has(fromName)) swaps.set(fromName, new Set())
+      swaps.get(fromName).add(toName)
+    }
+  }
+
+  const lines = []
+  for (const [fromName, altSet] of swaps) {
+    const alternatives = [...altSet]
+    const preview = alternatives.slice(0, 5).join('、')
+    const tail = alternatives.length > 5 ? ` 等 ${alternatives.length} 种` : ''
+    const kind = alternatives.every((name) => name.endsWith('_planks')) ? '任意木板' : '其他同类材料'
+    lines.push(
+      `注：图中的 ${fromName} 可以替换为${kind}（如 ${preview}${tail}，效果完全相同）。`
+    )
+  }
+  return lines
+}
+
+/**
+ * 分支 B：合成配方文本（严格 Markdown）。
+ *
+ * 输出约定（前端会正则解析，改动请同步 public/index.html）：
+ *   · 每种有序配方：先一行 `产出：<英文ID> x<数量>`，紧跟 3 行 Markdown 表格；
+ *   · 无序配方：`所需材料：a xN, b xM（无序...）`；
+ *   · 熔炼：`熔炉烧炼：放入 <原料>，产出 <产物>`。
+ */
+function formatRecipeMarkdown(mcData, info) {
+  const recipes = (info.itemId != null && mcData.recipes[info.itemId]) || []
+
+  // 同一种物品常有多个材料方案（工作台有 12 种木板，石镐有圆石/深板岩/黑石三种）。
+  // 排序目标：让“最常见”的方案排第一 —— 深板岩/黑石/异种木板这类冷门材料往后压，
+  // 同等冷门程度再按材料 id 升序（结果稳定，不随数据文件顺序漂移）。
+  const UNCOMMON_MATERIAL_RE = /deepslate|blackstone|cherry|bamboo|mangrove|crimson|warped|polished/
+  const variantKey = (recipe) => {
+    const ids = (recipe.inShape || []).flat().filter((id) => id != null)
+    if (ids.length === 0) return Number.MAX_SAFE_INTEGER
+    const names = ids.map((id) => (mcData.items[id] && mcData.items[id].name) || '')
+    const uncommon = names.some((name) => UNCOMMON_MATERIAL_RE.test(name)) ? 1 : 0
+    return uncommon * 1e9 + Math.min(...ids)
+  }
+
+  const shaped = recipes
+    .filter((recipe) => Array.isArray(recipe.inShape))
+    .sort((a, b) => variantKey(a) - variantKey(b))
+  const shapeless = recipes.filter(
+    (recipe) => Array.isArray(recipe.ingredients) && !Array.isArray(recipe.inShape)
+  )
+  const smeltInput = SMELTING_RECIPES[info.name]
+
+  if (shaped.length === 0 && shapeless.length === 0 && !smeltInput) {
+    return (
+      `没有找到 ${info.name} 的合成配方：它可能需要熔炼、交易、怪物掉落，` +
+      '或在特定结构（村庄/要塞/沉船）里获取。'
+    )
+  }
+
+  const zh = itemNameMap[info.name]
+  const title = zh ? `${info.name}（${zh}）` : info.name
+  const blocks = []
+
+  // 特征聚合：形状指纹相同的配方合成一组，只画一张表 + 一行“可替换材料”说明。
+  // 木镐 12 种木板、石镐 3 种石料都属同一组，不必刷 12 张一模一样的表。
+  const groups = []
+  const groupIndexOf = new Map()
+  for (const recipe of shaped) {
+    const signature = shapeSignature(recipe.inShape)
+    if (!groupIndexOf.has(signature)) {
+      groupIndexOf.set(signature, groups.length)
+      groups.push([])
+    }
+    groups[groupIndexOf.get(signature)].push(recipe)
+  }
+
+  const shownGroups = groups.slice(0, MAX_RECIPE_VARIANTS)
+
+  shownGroups.forEach((group, index) => {
+    const recipe = group[0]
+    const count = (recipe.result && recipe.result.count) || 1
+    const suffix = groups.length > 1 ? `（配方 ${index + 1}/${groups.length}）` : ''
+    const lines = [
+      `产出：${info.name} x${count}${suffix}`,
+      renderShapeTable(mcData, recipe.inShape)
+    ]
+    if (group.length > 1) lines.push(...describeSubstitutions(mcData, recipe, group.slice(1)))
+    blocks.push(lines.join('\n'))
+  })
+
+  if (groups.length > shownGroups.length) {
+    blocks.push(`（还有 ${groups.length - shownGroups.length} 种形状不同的配方未展开）`)
+  }
+
+  shapeless.slice(0, MAX_RECIPE_VARIANTS).forEach((recipe) => {
+    const count = (recipe.result && recipe.result.count) || 1
+    blocks.push(
+      `所需材料：${formatIngredients(mcData, recipe.ingredients)}（无序，产出 ${info.name} x${count}）`
+    )
+  })
+
+  if (smeltInput) blocks.push(`熔炉烧炼：放入 ${smeltInput}，产出 ${info.name}`)
+
+  return [`合成配方：${title}`, blocks.join('\n\n')].join('\n')
+}
+
+/** query_game_knowledge 主实现（同步，纯查表） */
+function queryGameKnowledge(bot, args) {
+  const queryType = String(args.query_type || '').trim().toLowerCase()
+  const keyword = String(args.keyword || '').trim()
+
+  const mcData = getGameData(bot)
+  if (mcData.error) return { __raw: true, text: mcData.error }
+
+  if (!keyword) {
+    return { __raw: true, text: '缺少 keyword：请传物品的英文 ID（例如 stone_pickaxe）。' }
+  }
+
+  const info = lookupGameItem(mcData, keyword)
+  if (!info) {
+    return {
+      __raw: true,
+      text:
+        `找不到物品 "${keyword}"。keyword 必须是英文 ID（例如 stone_pickaxe、oak_planks），` +
+        '不能填中文名，也不要用方块的中文译名。'
+    }
+  }
+
+  if (queryType === 'recipe') {
+    log('TOOL', `[tools] query_game_knowledge：recipe ${info.name}`)
+    return { __raw: true, text: formatRecipeMarkdown(mcData, info) }
+  }
+
+  if (queryType === 'item') {
+    log('TOOL', `[tools] query_game_knowledge：item ${info.name}`)
+    return { __raw: true, text: formatItemInfo(info) }
+  }
+
+  return {
+    __raw: true,
+    text: `query_type 只能是 item 或 recipe，收到的是 "${args.query_type}"。`
+  }
+}
+
 // ------------------------------ 统一执行入口 ------------------------------
 /**
  * 工具分发（内部函数）：只负责把 toolName 路由到具体实现，返回值可能是任何类型。
@@ -2612,11 +2958,15 @@ async function dispatchTool(bot, toolName, safeArgs) {
     case 'get_status':
       return getStatus(bot)
 
+    // ---- 游戏知识（返回严格 Markdown，禁止二次汉化） ----
+    case 'query_game_knowledge':
+      return queryGameKnowledge(bot, safeArgs)
+
     default:
       return (
         `未知工具 "${toolName}"。可用工具：collect_resource、craft_item、` +
         `attack_entity、find_entities、interact_with_block、equip_item、drop_item、` +
-        `move_to、explore、scan_environment、get_status`
+        `move_to、explore、scan_environment、get_status、query_game_knowledge`
       )
   }
 }
@@ -2638,6 +2988,11 @@ async function executeTool(bot, toolName, args = {}) {
 
   try {
     const raw = await dispatchTool(bot, toolName, safeArgs)
+
+    // 例外：query_game_knowledge 返回严格 Markdown 表格，格子里的英文 ID 必须原样
+    // 交给前端拼贴图 URL，一旦被 localizeText 包成“圆石(cobblestone)”就解析不了了。
+    if (raw && typeof raw === 'object' && raw.__raw === true) return String(raw.text ?? '')
+
     // raw 全部是字符串；仍然兜一层 String() 防止某个工具忘了 return
     return localizeText(String(raw ?? ''))
   } catch (err) {
@@ -2666,6 +3021,11 @@ module.exports = {
   moveTo,
   explore,
   scanEnvironment,
+  queryGameKnowledge, // 游戏知识查询（单测直接调，不需要 bot）
+  formatRecipeMarkdown,
+  formatItemInfo,
+  lookupGameItem,
+  getGameData,
   detectDangerNearby,
   countInInventory,
   checkDigCapability,
