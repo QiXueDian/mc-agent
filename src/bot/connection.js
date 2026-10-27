@@ -27,11 +27,13 @@ const { pathfinder } = require('mineflayer-pathfinder')
 // 复用工具层的寻路初始化（Movements 配置只维护一份）
 const { setupMovements } = require('../agent/tools')
 const { log } = require('../agent/utils')
+// AI 视角（prismarine-viewer）：独立端口 + 失败只 WARN，绝不影响 Agent 主循环
+const { initViewer } = require('./viewer')
 
 // ------------------------------ 连接配置 ------------------------------
 const MC_CONFIG = {
   host: process.env.MC_HOST || '127.0.0.1',
-  port: Number(process.env.MC_PORT || 58034),
+  port: Number(process.env.MC_PORT || 25565),
   username: process.env.MC_USERNAME || 'AIAgent',
   version: process.env.MC_VERSION || undefined, // 留空 = 自动探测服务端版本
   reconnectDelay: Number(process.env.MC_RECONNECT_DELAY || 5000)
@@ -41,6 +43,46 @@ const MC_CONFIG = {
 let bot = null // 当前实例（重连时会被替换）
 let reconnecting = false // 防止断线事件重复排定重连定时器
 let manualQuit = false // 主动退出标记：为 true 时断线不再重连
+
+/** 死亡事件订阅者：loop.js 用它把“我刚死了”喂回对话上下文 */
+const deathListeners = new Set()
+
+/**
+ * 订阅死亡事件。
+ * @param {(info: {position: string, at: number}) => void} callback
+ * @returns {() => void} 取消订阅函数（loop 结束时必须调用，否则监听器随轮次累积）
+ */
+function onDeath(callback) {
+  if (typeof callback !== 'function') return () => {}
+  deathListeners.add(callback)
+  return () => deathListeners.delete(callback)
+}
+
+/**
+ * 立刻打断机器人当前动作（寻路 / 挖掘 / 按键）。
+ *
+ * 为什么必须有它：AbortController 只能让 Agent 循环在**下一次检查**时停下，
+ * 而 pathfinder.goto() 可能要跑 30 秒 —— 用户点了“停止”却还要看机器人走完，
+ * 体感就是“停不下来”。这里直接把底层动作掐掉。
+ */
+function interruptBotActions() {
+  if (!bot) return
+  try {
+    if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop()
+  } catch (_) {
+    /* 寻路插件未加载时忽略 */
+  }
+  try {
+    if (typeof bot.stopDigging === 'function') bot.stopDigging()
+  } catch (_) {
+    /* 没在挖时忽略 */
+  }
+  try {
+    if (typeof bot.clearControlStates === 'function') bot.clearControlStates()
+  } catch (_) {
+    /* 忽略按键状态异常 */
+  }
+}
 
 /** 是否已经 spawn 完成（可以执行动作） */
 function isReady() {
@@ -67,6 +109,14 @@ function createBot() {
 
   bot.once('login', () => log('MC', '登录成功'))
 
+  // 首次 spawn 后启动 AI 视角：viewer 内部自己 try/catch，这里再包一层纯属保险，
+  // 保证“画面起不来”永远不会变成“机器人不动了”。
+  bot.once('spawn', () => {
+    initViewer(bot).catch((err) => {
+      log('WARN', `[VIEWER] 初始化异常（忽略，Agent 继续运行）：${err && err.message ? err.message : err}`)
+    })
+  })
+
   // 用 on 而不是 once：死亡重生、跨维度传送都会再次 spawn，需要重建 Movements
   bot.on('spawn', () => {
     try {
@@ -77,7 +127,20 @@ function createBot() {
     }
   })
 
-  bot.on('death', () => log('MC', '机器人死亡了，等待重生'))
+  // 死亡：不只是打日志，还要广播给 Agent 循环（否则模型醒来还以为自己在原地干活）
+  bot.on('death', () => {
+    const position = bot.entity && bot.entity.position ? `${bot.entity.position.x}, ${bot.entity.position.y}, ${bot.entity.position.z}` : '未知'
+    log('WARN', `机器人死亡（位置 ${position}），等待重生`)
+
+    const info = { position, at: Date.now() }
+    for (const listener of deathListeners) {
+      try {
+        listener(info)
+      } catch (err) {
+        log('ERROR', `死亡回调执行异常：${err && err.message ? err.message : err}`)
+      }
+    }
+  })
   bot.on('kicked', (reason) => log('ERROR', `被服务器踢出：${JSON.stringify(reason)}`))
   bot.on('error', (err) => log('ERROR', `Minecraft 连接错误：${err.message}`))
   bot.on('end', (reason) => {
@@ -151,5 +214,7 @@ module.exports = {
   waitForSpawn,
   isReady,
   disconnect,
+  interruptBotActions,
+  onDeath,
   MC_CONFIG
 }

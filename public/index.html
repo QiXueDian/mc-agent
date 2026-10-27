@@ -594,6 +594,22 @@
       cursor: not-allowed;
       transform: none;
     }
+
+    /* 停止生成：红色，只在任务执行中显示 */
+    #stop {
+      padding: 11px 16px;
+      border: 1px solid #b83a2c;
+      border-radius: 10px;
+      background: #c0392b;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+
+    #stop:hover { background: #d64535; transform: translateY(-1px); }
+    #stop[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -655,6 +671,7 @@
     <footer>
       <input id="input" type="text" placeholder="想让我做什么？" autocomplete="off" />
       <button id="send">发送</button>
+      <button id="stop" hidden>停止生成</button>
     </footer>
   </div>
 
@@ -663,6 +680,7 @@
     const logEl = document.getElementById('log')
     const inputEl = document.getElementById('input')
     const sendBtn = document.getElementById('send')
+    const stopBtn = document.getElementById('stop')
     const statusText = document.getElementById('statusText')
     const dot = document.getElementById('dot')
     const emptyHint = document.getElementById('emptyHint')
@@ -673,6 +691,14 @@
     const renderQueue = [] // 打字机渲染队列
     let rendering = false // 队列是否正在消费
     const TYPE_SPEED = 12 // 每个字符的间隔（毫秒），越小越快
+
+    // ==================== 静态资源根地址（全局唯一，禁止在别处硬编码） ====================
+    /**
+     * 全站唯一的贴图 CDN 根地址（misode/mcmeta 的 assets 分支，与游戏版本解耦）。
+     * 合成配方网格、HUD 快捷栏图标都必须从这里拼：`${ASSET_BASE_URL}/item/x.png`。
+     * 换 CDN 只改这一行，别处不许再写裸 URL。
+     */
+    const ASSET_BASE_URL = 'https://cdn.jsdelivr.net/gh/misode/mcmeta@assets/assets/minecraft/textures'
 
     // 不同类型 -> 前缀与样式类
     const TYPE_MAP = {
@@ -694,10 +720,37 @@
 
     function setBusy(next) {
       busy = next
-      sendBtn.disabled = next
-      sendBtn.textContent = next ? '执行中…' : '发送'
+      // 发送键**不再禁用**：执行中也能发新指令，后端会 abort 旧任务并接管
+      sendBtn.disabled = false
+      // 只有执行中才显示“停止生成”
+      if (stopBtn) stopBtn.hidden = !next
       statusText.textContent = next ? '思考中' : '空闲'
       dot.classList.toggle('busy', next)
+    }
+
+    /** 请求后端中断当前任务（幂等，没有任务时后端返回 stopped:false） */
+    async function requestStop() {
+      try {
+        await fetch('/api/agent/stop', { method: 'POST' })
+      } catch (err) {
+        console.warn('停止请求失败（忽略）：', err)
+      }
+    }
+
+    /**
+     * 点“停止生成”：先本地收尾（立刻有反馈），再通知后端掐断机器人动作。
+     * 不等后端回包 —— 网络慢的时候用户会以为按钮没生效。
+     */
+    function stopGeneration() {
+      if (!busy) return
+
+      if (eventSource) {
+        eventSource.close()
+        eventSource = null
+      }
+      setBusy(false)
+      enqueue({ kind: 'msg', type: 'warn', text: '已请求停止，机器人动作正在中断…' })
+      requestStop()
     }
 
     /**
@@ -760,9 +813,8 @@
      * 解析规则：一行 3 列表格 + 紧跟 `| --- |` 分隔行 = 一个配方块；
      * 产物与“方案 X”标识从上面最近的 `产出：xxx xN` 行取（取到就从正文里摘掉，改当标题）。
      */
-    const TEXTURE_BASE = 'https://cdn.jsdelivr.net/gh/misode/mcmeta@assets/assets/minecraft/textures/'
-    const ITEM_TEXTURE_BASE = TEXTURE_BASE + 'item/'
-    const BLOCK_TEXTURE_BASE = TEXTURE_BASE + 'block/'
+    const ITEM_TEXTURE_BASE = `${ASSET_BASE_URL}/item/`
+    const BLOCK_TEXTURE_BASE = `${ASSET_BASE_URL}/block/`
     const EMPTY_CELL = '空'
     const TABLE_SEP_RE = /^\|(\s*:?-{2,}:?\s*\|)+\s*$/
     const PRODUCT_RE = /产出\s*[:：]\s*([A-Za-z0-9_]+)\s*[x×]\s*(\d+)/
@@ -980,7 +1032,10 @@
     // ==================== 发送指令 ====================
     function sendMessage() {
       const message = inputEl.value.trim()
-      if (!message || busy) return
+      if (!message) return
+
+      // 执行中发新指令 = 顶掉旧任务（不再要求“等上一条跑完”）
+      const preempting = busy
 
       if (emptyHint && emptyHint.parentNode) emptyHint.remove()
 
@@ -989,6 +1044,9 @@
         eventSource.close()
         eventSource = null
       }
+
+      // 主动掐一下旧任务：后端会 abort 循环并立刻停止寻路/挖掘
+      if (preempting) requestStop()
 
       inputEl.value = ''
       setBusy(true)
@@ -1013,6 +1071,12 @@
         // 步骤分隔线：单独处理，不参与打字机
         if (type === 'step') {
           enqueue({ kind: 'step', text: payload.text })
+          return
+        }
+
+        // 机器人死亡：红色高亮，但连接继续（死亡后 Agent 会重置上下文继续跑）
+        if (type === 'death') {
+          enqueue({ kind: 'msg', type: 'error', text: '💀 ' + payload.text })
           return
         }
 
@@ -1262,7 +1326,6 @@
     const hudArmorNum = document.getElementById('hudArmorNum')
 
     const HUD_INTERVAL = 2000 // 轮询间隔（毫秒）
-    const HUD_ICON_BASE = 'https://cdn.jsdelivr.net/gh/misode/mcmeta@assets/assets/minecraft/textures'
     const hudIconFailed = new Set() // 图标彻底失败的物品名，不再重试
     const hudSlots = []
     let hudTimer = null
@@ -1281,12 +1344,12 @@
       img.alt = item.name
       img.decoding = 'async'
       img.dataset.folder = 'item'
-      img.src = `${HUD_ICON_BASE}/item/${item.name}.png`
+      img.src = `${ASSET_BASE_URL}/item/${item.name}.png`
 
       img.addEventListener('error', () => {
         if (img.dataset.folder === 'item') {
           img.dataset.folder = 'block'
-          img.src = `${HUD_ICON_BASE}/block/${item.name}.png`
+          img.src = `${ASSET_BASE_URL}/block/${item.name}.png`
           return
         }
         hudIconFailed.add(item.name)
@@ -1447,6 +1510,7 @@
 
     // ==================== 事件绑定 ====================
     sendBtn.addEventListener('click', sendMessage)
+    if (stopBtn) stopBtn.addEventListener('click', stopGeneration)
     inputEl.addEventListener('keydown', (e) => {
       // Enter 发送，Shift+Enter 换行（虽然这里是单行输入框）
       if (e.key === 'Enter' && !e.isComposing) {

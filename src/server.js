@@ -20,7 +20,15 @@ const express = require('express')
 
 const { runAgent, ACTIVE_PERSONA } = require('./agent/loop')
 const { isPersona, getSystemPrompt, listPersonas } = require('./agent/personas')
-const { waitForSpawn, isReady, disconnect } = require('./bot/connection')
+const {
+  waitForSpawn,
+  isReady,
+  disconnect,
+  getBot,
+  interruptBotActions
+} = require('./bot/connection')
+const { getViewerInfo, restartViewer } = require('./bot/viewer')
+const { getHudSnapshot } = require('./bot/hud')
 const { log, describeError } = require('./agent/utils')
 
 const SERVER_PORT = Number(process.env.PORT || 3000)
@@ -97,10 +105,46 @@ function createSSEChannel(req, res) {
 const app = express()
 
 // 托管前端：public/index.html → http://localhost:3000/
+// 只为了让 POST /api/persona、/api/viewer/mode 能读 JSON body；GET 完全不受影响
+app.use(express.json({ limit: '16kb' }))
 app.use(express.static(path.join(__dirname, '..', 'public')))
 
-/** 同一时间只允许一个 Agent 任务占用机器人，避免两路 SSE 抢 bot */
-let agentBusy = false
+/**
+ * 同一时间只允许一个 Agent 任务占用机器人，避免两路 SSE 抢 bot。
+ *
+ * 与旧版“忙就拒绝”的区别：现在新任务会 **抢占** 旧任务（abort + 掐断寻路/挖掘），
+ * 然后等旧任务在 finally 里释放串行锁，再启动新的 —— 任意时刻仍然只有一个 run 在跑。
+ */
+let activeRun = null // { id, controller, message, finished }
+let runSeq = 0
+
+/** 是否正在执行任务（/api/viewer 的提示文案要用） */
+function isAgentBusy() {
+  return Boolean(activeRun)
+}
+
+/**
+ * 中断当前任务：先 abort（让循环退出），再掐底层动作（让机器人立刻停手）。
+ * 返回是否真的中断了。
+ */
+function abortActiveRun(reason = '用户中断') {
+  if (!activeRun) return false
+
+  const id = activeRun.id
+  activeRun.controller.abort()
+  // abort 只能让循环在下一次检查时停下，pathfinder.goto 可能还要走几十秒，
+  // 所以这里必须直接掐断底层动作，否则用户点了停止还得看它走完。
+  interruptBotActions()
+  log('HTTP', `已中断任务 #${id}（${reason}）`)
+  return true
+}
+
+/**
+ * 当前风格（persona）。
+ * 初值来自 .env 的 AGENT_PERSONA（启动时决定），之后可由 POST /api/persona 在运行期切换；
+ * 因为 runAgent 支持 per-request 覆盖 systemPrompt，所以 loop.js 一行都不用改。
+ */
+let currentPersonaId = ACTIVE_PERSONA
 
 // ----------------------------------------------------------------------------
 //  多轮对话记忆（Context Memory）
@@ -128,6 +172,10 @@ app.get('/api/agent', async (req, res) => {
   const channel = createSSEChannel(req, res)
   const message = String(req.query.message || '').trim()
 
+  // 在 try 外声明：finally 里要用它们释放串行锁，早退分支也必须能安全走到 finally
+  let runId = 0
+  let releaseRun = () => {}
+
   log('HTTP', `收到指令：${message || '(空)'}`)
 
   try {
@@ -136,12 +184,24 @@ app.get('/api/agent', async (req, res) => {
       channel.emit('error', { text: '缺少 message 参数，请使用 /api/agent?message=你的指令' })
       return
     }
-    if (agentBusy) {
-      channel.emit('warn', { text: '机器人正在处理上一个任务，请稍后再试' })
-      return
+    // ---- 抢占式调度：新指令顶掉旧任务（不是“忙就拒绝”）----
+    if (activeRun) {
+      log('HTTP', `收到新指令，先中断正在执行的任务 #${activeRun.id}`)
+      abortActiveRun('被新指令覆盖')
+      // 等旧任务在 finally 里释放锁，保证任意时刻只有一个 run 在操作 bot
+      try {
+        await activeRun.finished
+      } catch (_) {
+        /* 旧任务的异常由它自己的 catch 处理 */
+      }
     }
 
-    agentBusy = true
+    const controller = new AbortController()
+    runId = ++runSeq
+    const finished = new Promise((resolve) => {
+      releaseRun = resolve
+    })
+    activeRun = { id: runId, controller, message, finished }
 
     // ---- 可选：?reset=1 清空记忆，方便反复测试 ----
     if (req.query.reset === '1') {
@@ -158,27 +218,34 @@ app.get('/api/agent', async (req, res) => {
     //     这里传全量会导致同一句话出现两次。
     const history = chatHistory.slice(0, -1)
 
-    // ---- 3) 确保机器人已进入游戏 ----
+    // ---- 3) 风格（persona）----
+    //     优先级：?persona= 单次覆盖 > 当前选择（POST /api/persona）> 启动默认值
+    //     loop.js 不需要知道这些，它只接收一个 systemPrompt 字符串。
+    //     放在等待 spawn 之前：参数问题应当立刻反馈，而不是等机器人上线才报。
+    const personaKey = String(req.query.persona || '').trim().toLowerCase()
+    let requestPersonaId = currentPersonaId
+
+    if (personaKey) {
+      if (isPersona(personaKey)) {
+        requestPersonaId = personaKey
+        log('HTTP', `本次请求使用风格：${personaKey}（单次覆盖）`)
+      } else {
+        channel.emit('warn', { text: `未知风格 "${personaKey}"，本次沿用当前风格 ${currentPersonaId}` })
+      }
+    }
+
+    // ---- 3.5) 确保机器人已进入游戏 ----
     if (!isReady()) {
       channel.emit('warn', { text: '机器人还没进入游戏，正在等待 spawn…' })
       await waitForSpawn()
-    }
-
-    // ---- 3.5) 可选：?persona=worker|tsundere|chunibyo 临时换人格（方便对比三个版本）----
-    //     不传则用 .env 里 AGENT_PERSONA 指定的默认人格；传错值只警告、不中断任务。
-    const personaKey = String(req.query.persona || '').trim().toLowerCase()
-    const personaOverride = isPersona(personaKey) ? getSystemPrompt(personaKey) : undefined
-    if (personaKey && !personaOverride) {
-      channel.emit('warn', { text: `未知人格 "${personaKey}"，本次沿用默认人格 ${ACTIVE_PERSONA}` })
-    } else if (personaOverride) {
-      log('HTTP', `本次请求使用人格：${personaKey}`)
     }
 
     // ---- 4) 交给 Agent 循环：唯一的耦合点就是 emit 这个函数 ----
     const answer = await runAgent(message, channel.emit, {
       shouldStop: channel.isClosed,
       history,
-      systemPrompt: personaOverride // undefined → 循环内部自动回落到默认人格
+      signal: controller.signal, // 用户点停止 / 被新指令覆盖时，循环靠它退出
+      systemPrompt: getSystemPrompt(requestPersonaId) // 显式传入，循环内部不再回落到启动常量
     })
 
     // ---- 5) 保存模型回复（客户端提前断开就不存，避免污染记忆）----
@@ -194,9 +261,25 @@ app.get('/api/agent', async (req, res) => {
     channel.emit('error', { text: `服务端异常：${describeError(err)}` })
     log('ERROR', `处理请求失败：${describeError(err)}`)
   } finally {
-    agentBusy = false
+    // 只有“自己还是当前 run”时才清空，避免被抢占后误清掉新任务的登记
+    if (activeRun && activeRun.id === runId) activeRun = null
+    releaseRun()
     channel.close()
   }
+})
+
+/**
+ * 停止当前任务（前端红色【停止生成】按钮）。
+ * 幂等：没有任务在跑时返回 stopped:false，前端据此决定提示文案。
+ */
+app.post('/api/agent/stop', (req, res) => {
+  if (!activeRun) {
+    return res.json({ ok: true, stopped: false, text: '当前没有正在执行的任务' })
+  }
+
+  const id = activeRun.id
+  abortActiveRun('用户点了停止')
+  res.json({ ok: true, stopped: true, id })
 })
 
 /** 查看当前对话记忆（调试用；也可以用来确认“目标没丢”） */
@@ -204,9 +287,108 @@ app.get('/api/history', (req, res) => {
   res.json({ max: MAX_HISTORY_MESSAGES, count: chatHistory.length, messages: chatHistory })
 })
 
-/** 人格清单：前端下拉框 / 手动对比时用 */
+/** 风格清单：前端下拉框用（id / name / description，另带 key / label 别名） */
 app.get('/api/personas', (req, res) => {
-  res.json({ active: ACTIVE_PERSONA, personas: listPersonas() })
+  res.json({ active: currentPersonaId, personas: listPersonas() })
+})
+
+/**
+ * 切换当前风格。
+ * 只改内存态，不影响正在执行的任务（当前轮 system prompt 已在请求开始时固化），
+ * 所以前端提示必须写“下一次指令生效”。
+ */
+app.post('/api/persona', (req, res) => {
+  const id = String((req.body && req.body.id) || '').trim().toLowerCase()
+
+  if (!id) {
+    return res.status(400).json({ ok: false, error: '缺少 id 参数' })
+  }
+  if (!isPersona(id)) {
+    // 非法 id：明确报错，不静默回落、不改当前状态
+    return res.status(400).json({ ok: false, error: `未知风格 "${id}"`, active: currentPersonaId })
+  }
+
+  const previous = currentPersonaId
+  currentPersonaId = id
+
+  const info = listPersonas().find((item) => item.id === id)
+  log('HTTP', `风格已切换：${previous} → ${id}（${info ? info.name : id}）`)
+
+  return res.json({
+    ok: true,
+    active: currentPersonaId,
+    name: info ? info.name : id,
+    description: info ? info.description : ''
+  })
+})
+
+/**
+ * 切换 AI 视角（第一人称 / 第三人称）。
+ *
+ * 实现方式是“重启 viewer”：prismarine-viewer 的 firstPerson 是启动参数、被闭包捕获，
+ * 运行期改不了（调研结论）。重启会短暂中断画面，但不影响 Agent 循环与 SSE。
+ * 失败一律 500 + WARN，前端回滚按钮，绝不假装成功。
+ */
+app.post('/api/viewer/mode', async (req, res) => {
+  const raw = req.body ? req.body.firstPerson : undefined
+
+  if (raw === undefined || raw === null || raw === '') {
+    return res.status(400).json({ ok: false, error: '缺少 firstPerson 参数（true / false）' })
+  }
+
+  const want = raw === true || raw === 'true' || raw === 1 || raw === '1'
+
+  // 切视角只影响画面，不动 Agent；但正在跑任务时提醒一句，免得用户以为任务被打断
+  const notice = isAgentBusy() ? '切换视角会短暂中断画面，不影响 Agent 执行' : ''
+  if (notice) log('WARN', notice)
+
+  try {
+    const result = await restartViewer(getBot(), want)
+
+    if (!result.ok) {
+      log('WARN', `[VIEWER] 切换失败，画面保持原状：${result.message}`)
+      return res.status(500).json({
+        ok: false,
+        error: result.message,
+        code: result.code,
+        notice,
+        viewer: getViewerInfo()
+      })
+    }
+
+    return res.json({
+      ok: true,
+      firstPerson: result.firstPerson,
+      url: result.url,
+      notice,
+      viewer: getViewerInfo()
+    })
+  } catch (err) {
+    log('WARN', `[VIEWER] 切换异常，画面保持原状：${describeError(err)}`)
+    return res.status(500).json({
+      ok: false,
+      error: `切换失败：${describeError(err)}`,
+      notice,
+      viewer: getViewerInfo()
+    })
+  }
+})
+
+/**
+ * HUD 数据：血量 / 饥饿 / 护甲 / 手持物 / 快捷栏 / 坐标。
+ *
+ * 设计要点：
+ *   · 未 spawn 或背包未同步 → 200 + { ok:true, ready:false }，让前端置灰但保留旧值；
+ *   · 前端 2 秒轮询一次，所以要轻：纯内存读，没有寻路/方块查询；
+ *   · 所有空槽在后端就归一化为 null，前端不需要防御 undefined。
+ */
+app.get('/api/bot/hud', (req, res) => {
+  try {
+    res.json(getHudSnapshot(getBot()))
+  } catch (err) {
+    log('WARN', `[HUD] 读取状态失败（返回未就绪）：${describeError(err)}`)
+    res.json({ ok: true, ready: false, at: Date.now() })
+  }
 })
 
 /** 健康检查：排查机器人是否在线 */
@@ -215,7 +397,9 @@ app.get('/api/health', (req, res) => {
     ok: true,
     botReady: isReady(),
     model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
-    persona: ACTIVE_PERSONA
+    persona: currentPersonaId,
+    // 只新增字段，不改动上面任何一个已有字段（前端 iframe 地址也从这里取）
+    viewer: getViewerInfo()
   })
 })
 
@@ -224,6 +408,14 @@ const server = app.listen(SERVER_PORT, () => {
   log('HTTP', `Web 服务已启动：http://localhost:${SERVER_PORT}`)
   // connection.js 在 require 时已开始连接，这里只是提示
   log('HTTP', '机器人连接由 src/bot/connection.js 维护（断线自动重连）')
+
+  // AI 视角：独立端口，机器人 spawn 后才真正启动；disabled 时不会有任何监听
+  const viewer = getViewerInfo()
+  if (!viewer.enabled) {
+    log('HTTP', 'AI 视角已禁用（VIEWER_ENABLED=0），不会监听额外端口')
+  } else {
+    log('HTTP', `AI 视角将在机器人 spawn 后启动：${viewer.url}（独立端口 ${viewer.port}）`)
+  }
 })
 
 let shuttingDown = false

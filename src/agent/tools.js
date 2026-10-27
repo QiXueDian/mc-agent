@@ -112,219 +112,9 @@ const ITEM_ALIAS = {
 /** 工具等级从高到低，用于在背包里挑“最好用的那件” */
 const TOOL_TIERS = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden']
 
-// ============================================================================
-//  物品 / 实体名称中文映射（解决“中英混杂”）
-// ----------------------------------------------------------------------------
-//  为什么需要它：工具返回的是英文 ID（cobblestone、stick），大模型会照抄进思考过程，
-//  于是输出变成“我需要 cobblestone 做一个 stone_pickaxe”。统一转成
-//  “圆石(cobblestone)” 之后：模型读得懂中文，同时仍然看得到英文 ID，
-//  后续调用工具（参数必须是英文 ID）不会丢信息。
-//
-//  ⚠️ 只影响“输出文案”。工具入参依旧是英文 ID，逻辑层始终用英文 ID 去查 registry。
-// ============================================================================
-const itemNameMap = {
-  // ---- 建筑材料 ----
-  cobblestone: '圆石',
-  stone: '石头',
-  dirt: '泥土',
-  grass_block: '草方块',
-  sand: '沙子',
-  gravel: '砂砾',
-  andesite: '安山岩',
-  diorite: '闪长岩',
-  granite: '花岗岩',
-  deepslate: '深板岩',
-  cobbled_deepslate: '深板岩圆石',
-  obsidian: '黑曜石',
-  bedrock: '基岩',
-  glass: '玻璃',
-  sandstone: '砂岩',
-  terracotta: '陶瓦',
-  tuff: '凝灰岩',
-  netherrack: '下界岩',
-  ancient_debris: '远古残骸',
-  lava: '岩浆',
-  fire: '火焰',
-  soul_fire: '灵魂火',
-  magma_block: '岩浆块',
-  cactus: '仙人掌',
-  powder_snow: '细雪',
-  // ---- 木头与植物 ----
-  oak_log: '橡木原木',
-  oak_wood: '橡木',
-  oak_planks: '橡木木板',
-  oak_sapling: '橡树苗',
-  oak_leaves: '橡树树叶',
-  oak_button: '橡木按钮',
-  oak_slab: '橡木台阶',
-  oak_stairs: '橡木楼梯',
-  oak_door: '橡木门',
-  oak_fence: '橡木栅栏',
-  birch_log: '白桦原木',
-  birch_planks: '白桦木板',
-  spruce_log: '云杉原木',
-  spruce_planks: '云杉木板',
-  stick: '木棍',
-  coal: '煤炭',
-  charcoal: '木炭',
-  // ---- 矿物与材料 ----
-  raw_iron: '粗铁',
-  iron_ingot: '铁锭',
-  iron_ore: '铁矿石',
-  deepslate_iron_ore: '深层铁矿石',
-  iron_nugget: '铁粒',
-  raw_copper: '粗铜',
-  copper_ingot: '铜锭',
-  raw_gold: '粗金',
-  gold_ingot: '金锭',
-  gold_nugget: '金粒',
-  diamond: '钻石',
-  emerald: '绿宝石',
-  redstone: '红石',
-  lapis_lazuli: '青金石',
-  quartz: '下界石英',
-  flint: '燧石',
-  clay_ball: '黏土球',
-  // ---- 工具与武器 ----
-  wooden_pickaxe: '木镐',
-  stone_pickaxe: '石镐',
-  iron_pickaxe: '铁镐',
-  golden_pickaxe: '金镐',
-  diamond_pickaxe: '钻石镐',
-  netherite_pickaxe: '下界合金镐',
-  wooden_axe: '木斧',
-  stone_axe: '石斧',
-  iron_axe: '铁斧',
-  diamond_axe: '钻石斧',
-  wooden_shovel: '木锹',
-  stone_shovel: '石锹',
-  iron_shovel: '铁锹',
-  diamond_shovel: '钻石锹',
-  wooden_sword: '木剑',
-  stone_sword: '石剑',
-  iron_sword: '铁剑',
-  diamond_sword: '钻石剑',
-  wooden_hoe: '木锄',
-  stone_hoe: '石锄',
-  iron_hoe: '铁锄',
-  diamond_hoe: '钻石锄',
-  shears: '剪刀',
-  bucket: '桶',
-  water_bucket: '水桶',
-  lava_bucket: '岩浆桶',
-  milk_bucket: '牛奶桶',
-  shield: '盾牌',
-  bow: '弓',
-  arrow: '箭',
-  fishing_rod: '钓鱼竿',
-  flint_and_steel: '打火石',
-  // ---- 防具 ----
-  leather_helmet: '皮革帽子',
-  leather_chestplate: '皮革外套',
-  leather_leggings: '皮革裤子',
-  leather_boots: '皮革靴子',
-  iron_helmet: '铁头盔',
-  iron_chestplate: '铁胸甲',
-  iron_leggings: '铁护腿',
-  iron_boots: '铁靴子',
-  diamond_helmet: '钻石头盔',
-  diamond_chestplate: '钻石胸甲',
-  diamond_leggings: '钻石护腿',
-  diamond_boots: '钻石靴子',
-  elytra: '鞘翅',
-  totem_of_undying: '不死图腾',
-  // ---- 食物与农业 ----
-  apple: '苹果',
-  bread: '面包',
-  wheat: '小麦',
-  wheat_seeds: '小麦种子',
-  farmland: '耕地',
-  carrot: '胡萝卜',
-  potato: '马铃薯',
-  beef: '生牛肉',
-  cooked_beef: '牛排',
-  porkchop: '生猪排',
-  cooked_porkchop: '熟猪排',
-  chicken: '生鸡肉',
-  cooked_chicken: '熟鸡肉',
-  mutton: '生羊肉',
-  rotten_flesh: '腐肉',
-  bone: '骨头',
-  bone_meal: '骨粉',
-  leather: '皮革',
-  feather: '羽毛',
-  white_wool: '白色羊毛',
-  egg: '鸡蛋',
-  // ---- 功能方块与容器 ----
-  crafting_table: '工作台',
-  furnace: '熔炉',
-  blast_furnace: '高炉',
-  smoker: '烟熏炉',
-  chest: '箱子',
-  barrel: '木桶',
-  torch: '火把',
-  ladder: '梯子',
-  lever: '拉杆',
-  brewing_stand: '酿造台',
-  cauldron: '炼药锅',
-  anvil: '铁砧',
-  composter: '堆肥桶',
-  // ---- 酿造材料 ----
-  glass_bottle: '玻璃瓶',
-  blaze_powder: '烈焰粉',
-  blaze_rod: '烈焰棒',
-  nether_wart: '下界疣',
-  ghast_tear: '恶魂之泪',
-  spider_eye: '蜘蛛眼',
-  fermented_spider_eye: '发酵蜘蛛眼',
-  sugar: '糖',
-  glowstone_dust: '荧石粉',
-  redstone_dust: '红石粉'
-}
+// 名称字典与知识查询已抽到 knowledge.js（tools → knowledge 单向依赖，禁止反向）
+const { itemNameMap, entityNameMap, queryGameKnowledge } = require('./knowledge')
 
-/** 常见实体中文名（战斗/感知工具的返回文案用） */
-const entityNameMap = {
-  zombie: '僵尸',
-  skeleton: '骷髅',
-  creeper: '苦力怕',
-  spider: '蜘蛛',
-  cave_spider: '洞穴蜘蛛',
-  enderman: '末影人',
-  witch: '女巫',
-  slime: '史莱姆',
-  drowned: '溺尸',
-  husk: '尸壳',
-  zombie_villager: '僵尸村民',
-  pillager: '掠夺者',
-  vindicator: '卫道士',
-  ravager: '劫掠兽',
-  blaze: '烈焰人',
-  ghast: '恶魂',
-  magma_cube: '岩浆怪',
-  cow: '牛',
-  pig: '猪',
-  sheep: '羊',
-  chicken: '鸡',
-  rabbit: '兔子',
-  horse: '马',
-  donkey: '驴',
-  wolf: '狼',
-  cat: '猫',
-  fox: '狐狸',
-  bat: '蝙蝠',
-  squid: '鱿鱼',
-  cod: '鳕鱼',
-  salmon: '鲑鱼',
-  villager: '村民',
-  wandering_trader: '流浪商人',
-  iron_golem: '铁傀儡',
-  snow_golem: '雪傀儡',
-  player: '玩家',
-  item: '掉落物',
-  armor_stand: '盔甲架',
-  boat: '船',
-  minecart: '矿车'
-}
 
 /**
  * 把一段文本里的英文 ID 批量替换成 “中文(ID)” 格式。
@@ -373,6 +163,8 @@ const SMELTING_SOURCE = {
 
 // ------------------------------ 公共工具函数（统一从 utils 引入，避免重复实现） ------------------------------
 const { sleep, withTimeout, formatPos, describeError, log } = require('./utils')
+// 生存判定与 loop.js 共用同一套阈值，避免“循环里说缺氧、工具里说没缺氧”这种自相矛盾
+const { readSurvivalState, formatSurvivalLine } = require('./survival')
 
 /** 根据方块名猜一个“该用什么工具”的提示词，用于给大模型看的失败原因 */
 function guessToolHint(blockName) {
@@ -687,6 +479,45 @@ const toolDefinitions = [
           }
         },
         required: ['query_type', 'keyword'],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'escape_danger',
+      description:
+        '【保命·最高优先级】当你在水下氧气不足、血量过低或身上着火时立刻调用：' +
+        '先游泳上浮出水，必要时（仅水下缺氧时）挖开头顶 1 格，再走向最近的岸边。' +
+        '不要在安全状态下调用它来代替普通移动（正常赶路请用 move_to / explore）。',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'locate_structure',
+      description:
+        '【结构侦察】按村庄特征方块（床/箱子/钟/工作台/熔炉/书架…）和实体（村民/流浪商人/铁傀儡/猫）' +
+        '在半径 64 格内搜索，返回命中种类、数量、最近距离与方位。' +
+        '找村庄、营地、据点时**必须先用它**，不要用 scan_environment 一大圈瞎找。只读，不会移动。',
+      parameters: {
+        type: 'object',
+        properties: {
+          radius: {
+            type: 'integer',
+            minimum: 16,
+            maximum: 96,
+            description: '扫描半径（格），默认 64；超过 96 会被截断'
+          }
+        },
+        required: [],
         additionalProperties: false
       }
     }
@@ -1099,8 +930,7 @@ async function collectResource(bot, args = {}) {
     // ---------------- 6. 兜底：任何意外都转成“人话”返回 ----------------
     // 典型来源：区块卸载导致的 blockAt 返回 null、pathfinder 内部异常、
     //           实体表在遍历时被清空、bot 在挖掘途中死亡等。
-    log('ERROR', `[tools] collect_resource 异常：${describeError(err)}`)
-    console.error(err)
+    log('ERROR', `[tools] collect_resource 异常：${describeError(err)}${err && err.stack ? `\n${err.stack}` : ''}`)
     return `收集 ${blockName || '资源'} 时发生异常：${describeError(err)}。请检查机器人是否还活着/是否卡住，然后再试一次。`
   }
 }
@@ -1469,8 +1299,7 @@ async function craftItem(bot, args = {}) {
     )
   } catch (err) {
     // 兜底：任何意外都不让 ReAct 循环崩掉
-    log('ERROR', `[tools] craft_item 异常：${describeError(err)}`)
-    console.error(err)
+    log('ERROR', `[tools] craft_item 异常：${describeError(err)}${err && err.stack ? `\n${err.stack}` : ''}`)
     return `合成 ${itemName || '物品'} 时发生异常：${describeError(err)}。请检查机器人状态后再试。`
   }
 }
@@ -2595,321 +2424,220 @@ async function scanEnvironment(bot, args = {}) {
 }
 
 // ============================================================================
-//  游戏知识查询（query_game_knowledge）—— minecraft-data 深度集成
+//  生存与侦察：escape_danger / locate_structure
 // ----------------------------------------------------------------------------
-//  数据来源：require('minecraft-data')(bot.version)
-//    · 物品属性：itemsByName / blocksByName（stackSize、maxDurability）
-//    · 配方：recipes[itemId] —— 注意是**按数字 id 索引，不是按名字**
-//        shaped    → inShape 是 3x3 的数字 id 矩阵，null 表示空位
-//        shapeless → ingredients 是数字 id 数组（重复出现即表示数量）
-//    · 熔炼：minecraft-data 1.21.x 的 recipes.json 只有工作台配方，没有熔炉配方，
-//            所以用内置 SMELTING_RECIPES 兜底（常见产物）。
-//
-//  ⚠️ 本工具返回的是**严格 Markdown**：表格格子必须是英文 ID（前端据此拼贴图 URL），
-//     所以返回 { __raw: true, text }，让 executeTool 跳过 localizeText 汉化。
+//  escape_danger  —— 保命优先级最高的动作：出水 → 必要时挖头顶 1 格 → 找岸边
+//  locate_structure —— 按“村庄特征方块 + 实体”侦察，替代用 scan_environment 瞎转
 // ============================================================================
-const minecraftData = require('minecraft-data')
 
-/** 单个配方最多展示几个方案（石镐有 3 种材料方案，全列会把上下文撑爆） */
-const MAX_RECIPE_VARIANTS = 3
+const ESCAPE_TIMEOUT = 6000 // 单次脱困总预算（毫秒）
+const ESCAPE_SWIM_TICK = 200 // 上浮时每次检查的间隔
+const ESCAPE_SHORE_RADIUS = 24 // 找岸边的搜索半径
+const ESCAPE_DIG_MAX_OXYGEN = 6 // 只有氧气低于等于这个值，才允许挖头顶方块（严格限制）
+const ESCAPE_SHORE_PATTERN = /^(sand|gravel|grass_block|dirt|coarse_dirt|stone|clay|cobblestone)$/
 
-/** 熔炼表（产物 → 原料）：minecraft-data 不提供，内置常用项兜底 */
-const SMELTING_RECIPES = {
-  iron_ingot: 'raw_iron',
-  gold_ingot: 'raw_gold',
-  copper_ingot: 'raw_copper',
-  glass: 'sand',
-  stone: 'cobblestone',
-  smooth_stone: 'stone',
-  charcoal: 'oak_log',
-  brick: 'clay_ball',
-  deepslate: 'cobbled_deepslate',
-  cooked_beef: 'beef',
-  cooked_porkchop: 'porkchop',
-  cooked_chicken: 'chicken',
-  cooked_mutton: 'mutton',
-  cooked_rabbit: 'rabbit',
-  cooked_cod: 'cod',
-  cooked_salmon: 'salmon',
-  baked_potato: 'potato',
-  dried_kelp: 'kelp'
-}
-
-/** 版本 → mcData 缓存：同一版本只解析一次（数据文件不小，反复加载会明显卡顿） */
-const MC_DATA_CACHE = new Map()
-
-/** 解析当前世界版本：优先 bot.version，其次 .env 的 MC_VERSION，最后取支持的最新版 */
-function resolveGameVersion(bot) {
-  const fromBot = bot && bot.version ? String(bot.version) : ''
-  const fromEnv = process.env.MC_VERSION ? String(process.env.MC_VERSION) : ''
-  if (fromBot) return fromBot
-  if (fromEnv) return fromEnv
-  const list = (minecraftData.supportedVersions && minecraftData.supportedVersions.pc) || []
-  return list[list.length - 1] || '1.21.1'
-}
-
-/** 取指定版本的 mcData；失败返回 { error }，绝不抛异常进循环 */
-function getGameData(bot) {
-  const version = resolveGameVersion(bot)
-  if (MC_DATA_CACHE.has(version)) return MC_DATA_CACHE.get(version)
-
-  try {
-    const data = minecraftData(version)
-    MC_DATA_CACHE.set(version, data)
-    return data
-  } catch (err) {
-    const error = `加载 Minecraft ${version} 的数据失败：${describeError(err)}`
-    log('ERROR', `[tools] query_game_knowledge ${error}`)
-    return { error }
-  }
-}
+const STRUCTURE_SCAN_RADIUS = 64 // 村庄特征方块默认扫描半径
+const STRUCTURE_SCAN_MAX_RADIUS = 96 // 上限，防止模型传 500
+const STRUCTURE_MAX_RESULTS = 48 // findBlocks 单次最多返回多少个坐标
+/** 村庄/营地特征方块：床有 16 种颜色、箱子还有 trapped_chest，必须用模式匹配而不是枚举常量 */
+const STRUCTURE_BLOCK_PATTERN =
+  /(_bed$|^chest$|^trapped_chest$|^bell$|^crafting_table$|^furnace$|^barrel$|^bookshelf$|^composter$|^fletching_table$|^cartography_table$|^smithing_table$|^stonecutter$|^grindstone$|^lectern$|^loom$|^anvil$|^chipped_anvil$|^damaged_anvil$)/
+/** 村庄居民类实体 */
+const STRUCTURE_ENTITY_PATTERN = /^(villager|wandering_trader|iron_golem|cat)$/
 
 /**
- * 在 mcData 里找物品/方块。
- * 容忍：大小写、连字符/空格（stone-pickaxe）、中文名反查（“石镐”）。
- */
-function lookupGameItem(mcData, keyword) {
-  const raw = String(keyword || '').trim()
-  if (!raw) return null
-
-  const id = raw.toLowerCase().replace(/[\s-]+/g, '_')
-  let name = id
-
-  if (!mcData.itemsByName[name] && !mcData.blocksByName[name]) {
-    // 中文名反查：玩家直接用“石镐怎么做”提问时也能命中
-    const zhHit = Object.entries(itemNameMap).find(([, zh]) => zh === raw)
-    if (!zhHit) return null
-    name = zhHit[0]
-  }
-
-  const item = mcData.itemsByName[name]
-  const block = mcData.blocksByName[name]
-  if (!item && !block) return null
-
-  // 配方按**物品 id** 索引；方块名通常也有同名物品（如 crafting_table），取不到就退回 block.id
-  const itemEntry = item || mcData.itemsByName[name] || null
-
-  return {
-    name: (item || block).name,
-    displayName: (item || block).displayName || (item || block).name,
-    itemId: itemEntry ? itemEntry.id : null,
-    stackSize: itemEntry && itemEntry.stackSize ? itemEntry.stackSize : 64,
-    maxDurability: itemEntry ? itemEntry.maxDurability : undefined
-  }
-}
-
-/** 分支 A：物品属性文本 */
-function formatItemInfo(info) {
-  const zh = itemNameMap[info.name]
-  const label = zh ? `${zh}（${info.name}）` : `${info.displayName}（${info.name}）`
-  const durability = info.maxDurability
-    ? `最大耐久：${info.maxDurability}`
-    : '最大耐久：无（该物品没有耐久度）'
-  return `物品：${label}\n最大堆叠：${info.stackSize}\n${durability}`
-}
-
-/** 3x3 有序合成表：**严格 Markdown**，第一行当表头，紧跟分隔行，空位填“空” */
-function renderShapeTable(mcData, inShape) {
-  const rows = []
-  for (let r = 0; r < 3; r++) {
-    const cells = []
-    for (let c = 0; c < 3; c++) {
-      const id = Array.isArray(inShape[r]) ? inShape[r][c] : null
-      cells.push(id == null ? '空' : (mcData.items[id] && mcData.items[id].name) || `unknown_${id}`)
-    }
-    rows.push(`| ${cells.join(' | ')} |`)
-  }
-  return [rows[0], '| --- | --- | --- |', rows[1], rows[2]].join('\n')
-}
-
-/** 无序合成材料：把重复 id 聚合成 “oak_planks x4” */
-function formatIngredients(mcData, ingredients) {
-  const counts = new Map()
-  for (const id of ingredients) {
-    const name = (mcData.items[id] && mcData.items[id].name) || `unknown_${id}`
-    counts.set(name, (counts.get(name) || 0) + 1)
-  }
-  return [...counts.entries()].map(([name, count]) => `${name} x${count}`).join(', ')
-}
-
-/** 把 inShape 摊平成 3x3（不足 3 行/列的配方补 null），长度恒为 9 */
-function flattenShape(inShape) {
-  const cells = []
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 3; c++) {
-      cells.push(Array.isArray(inShape[r]) && inShape[r][c] != null ? inShape[r][c] : null)
-    }
-  }
-  return cells
-}
-
-/** 形状指纹：只看“哪几格有料”，不看具体是什么料。形状相同 = 可聚合 */
-function shapeSignature(inShape) {
-  return flattenShape(inShape)
-    .map((id) => (id == null ? '0' : '1'))
-    .join('')
-}
-
-/**
- * 生成“可替换材料”说明（只对同一形状指纹的兄弟配方计算）。
+ * escape_danger —— 从水里/危险地形里爬出来。
  *
- * 例：木镐 12 种木板 → 表里画的是 oak_planks，说明里列出 spruce_planks 等 11 种；
- * 石镐 3 种石料 → 表里画 cobblestone，说明里列出 cobbled_deepslate、blackstone。
+ * 三段式策略（顺序不可颠倒，先便宜后昂贵）：
+ *   1) 游泳上浮：水上世界绝大多数情况足够，且不破坏地形；
+ *   2) 挖头顶 1 格：**只在还在水里且氧气 <= 6 时**才允许，严格 1 格，防止它拿这个工具乱挖；
+ *   3) 找最近岸边（沙/砾石/草方块/土/石）寻路过去。
+ *
+ * 返回：人类可读的处理过程 + 处理后的生存状态（模型据此决定要不要再逃一次）。
  */
-function describeSubstitutions(mcData, baseRecipe, siblings) {
-  const base = flattenShape(baseRecipe.inShape)
-  const swaps = new Map() // 原材料名 → Set(可替代材料名)
+async function escapeDanger(bot) {
+  if (!bot || !bot.entity) return '机器人还没有出生（spawn），无法执行逃生。'
 
-  for (const recipe of siblings) {
-    const current = flattenShape(recipe.inShape)
-    for (let i = 0; i < base.length; i++) {
-      const from = base[i]
-      const to = current[i]
-      if (from == null || to == null || from === to) continue
+  const before = readSurvivalState(bot)
+  const steps = []
 
-      const fromName = mcData.items[from] && mcData.items[from].name
-      const toName = mcData.items[to] && mcData.items[to].name
-      if (!fromName || !toName) continue
-
-      if (!swaps.has(fromName)) swaps.set(fromName, new Set())
-      swaps.get(fromName).add(toName)
+  // ① 游泳上浮
+  if (before.inWater) {
+    bot.setControlState('jump', true)
+    const deadline = Date.now() + ESCAPE_TIMEOUT
+    try {
+      while (Date.now() < deadline) {
+        await sleep(ESCAPE_SWIM_TICK)
+        if (!bot.entity.isInWater) break
+      }
+    } finally {
+      bot.setControlState('jump', false)
     }
+    steps.push(bot.entity.isInWater ? '上浮没能出水（可能头顶被方块封住）' : '已游出水面')
+  }
+
+  // ② 仍在水下且氧气告急 → 允许挖开头顶 1 格（严格限制）
+  const oxygen = before.oxygen === null ? 20 : before.oxygen
+  if (bot.entity.isInWater && oxygen <= ESCAPE_DIG_MAX_OXYGEN) {
+    const above = bot.blockAt(bot.entity.position.offset(0, 1, 0))
+    if (above && above.boundingBox === 'block' && bot.canDigBlock(above)) {
+      try {
+        await withTimeout(bot.dig(above), DIG_TIMEOUT, '挖开头顶方块')
+        steps.push(`氧气告急，挖开了头顶的 ${labelName(above.name)}`)
+      } catch (err) {
+        steps.push(`头顶方块没能挖开：${describeError(err)}`)
+      }
+    } else {
+      steps.push('头顶不是可挖的方块，放弃挖洞')
+    }
+  }
+
+  // ③ 找最近岸边上岸
+  if (bot.entity.isInWater) {
+    try {
+      const registry = bot.registry || getGameData(bot)
+      const shoreIds = []
+      for (const block of registry.blocksArray || []) {
+        if (ESCAPE_SHORE_PATTERN.test(block.name)) shoreIds.push(block.id)
+      }
+
+      const positions = bot.findBlocks({
+        matching: shoreIds,
+        maxDistance: ESCAPE_SHORE_RADIUS,
+        count: 8
+      })
+
+      // 取最近的、且本身不在水下的岸边方块
+      const target = positions
+        .filter((pos) => {
+          const block = bot.blockAt(pos)
+          return block && block.name !== 'water'
+        })
+        .sort((a, b) => a.distanceTo(bot.entity.position) - b.distanceTo(bot.entity.position))[0]
+
+      if (target) {
+        const result = await gotoWithGuard(
+          bot,
+          new GoalNear(target.x, target.y, target.z, 1),
+          ESCAPE_TIMEOUT,
+          '上岸'
+        )
+        steps.push(
+          result.ok
+            ? `已朝 ${directionLabel(bot, target)} 的岸边移动`
+            : `上岸移动失败：${result.aborted || result.error}`
+        )
+      } else {
+        steps.push(`半径 ${ESCAPE_SHORE_RADIUS} 格内没找到岸边方块`)
+      }
+    } catch (err) {
+      steps.push(`找岸边时出错：${describeError(err)}`)
+    }
+  }
+
+  const after = readSurvivalState(bot)
+  const head = before.inWater ? '【逃生】原本在水里' : '【逃生】当前不在水里'
+  const body = steps.length > 0 ? steps.join('；') : '无需处理'
+  const tail = after.critical
+    ? `仍然危急（${after.reason}），请立刻再调用一次 escape_danger 或向岸边前进。`
+    : '已脱离危险。'
+
+  return `${head}。${body}。\n当前：${formatSurvivalLine(after)}\n${tail}`
+}
+
+/**
+ * locate_structure —— 找村庄/营地这类“没有单一方块 ID”的结构。
+ *
+ * 原理：村庄没有“village”这个方块，只能靠**特征集合**判定：
+ *   床（16 色）、箱子、钟、工作台、熔炉、书架、制箭台… + 村民/铁傀儡/猫。
+ * 输出按“种类聚合 + 最近一处 + 方位”，并给出置信度结论，方便模型决定往哪走。
+ * 只读：绝不移动、不挖掘。
+ */
+function locateStructure(bot, args = {}) {
+  if (!bot || !bot.entity) return '机器人还没有出生（spawn），无法侦察。'
+
+  const requested = Number(args.radius)
+  const radius = Math.min(
+    Math.max(Number.isFinite(requested) && requested > 0 ? requested : STRUCTURE_SCAN_RADIUS, 16),
+    STRUCTURE_SCAN_MAX_RADIUS
+  )
+
+  const registry = bot.registry || getGameData(bot)
+  const structureIds = []
+  for (const block of registry.blocksArray || []) {
+    if (STRUCTURE_BLOCK_PATTERN.test(block.name)) structureIds.push(block.id)
+  }
+
+  let positions = []
+  try {
+    positions = bot.findBlocks({ matching: structureIds, maxDistance: radius, count: STRUCTURE_MAX_RESULTS })
+  } catch (err) {
+    return `侦察失败：${describeError(err)}`
+  }
+
+  // 按方块名聚合：数量 + 最近的一处（方位/距离）
+  const byName = new Map()
+  for (const pos of positions) {
+    const block = bot.blockAt(pos)
+    if (!block) continue
+    const distance = Math.round(pos.distanceTo(bot.entity.position))
+    const entry = byName.get(block.name) || { count: 0, nearest: distance, at: pos }
+    entry.count += 1
+    if (distance < entry.nearest) {
+      entry.nearest = distance
+      entry.at = pos
+    }
+    byName.set(block.name, entry)
+  }
+
+  // 实体侧：村民/铁傀儡/猫（很多村庄的床在房子里，实体反而更好认）
+  const entities = Object.values(bot.entities || {}).filter(
+    (entity) => entity && entity !== bot.entity && STRUCTURE_ENTITY_PATTERN.test(entity.name || '')
+  )
+  const entityByType = new Map()
+  for (const entity of entities) {
+    const distance = Math.round(entity.position.distanceTo(bot.entity.position))
+    const entry = entityByType.get(entity.name) || { count: 0, nearest: distance, at: entity.position }
+    entry.count += 1
+    if (distance < entry.nearest) {
+      entry.nearest = distance
+      entry.at = entity.position
+    }
+    entityByType.set(entity.name, entry)
   }
 
   const lines = []
-  for (const [fromName, altSet] of swaps) {
-    const alternatives = [...altSet]
-    const preview = alternatives.slice(0, 5).join('、')
-    const tail = alternatives.length > 5 ? ` 等 ${alternatives.length} 种` : ''
-    const kind = alternatives.every((name) => name.endsWith('_planks')) ? '任意木板' : '其他同类材料'
-    lines.push(
-      `注：图中的 ${fromName} 可以替换为${kind}（如 ${preview}${tail}，效果完全相同）。`
-    )
+  let blockHits = 0
+  for (const [name, entry] of byName) {
+    blockHits += entry.count
+    lines.push(`- ${labelName(name)} ×${entry.count}，最近 ${entry.nearest} 格（${directionLabel(bot, entry.at)}）`)
   }
-  return lines
-}
-
-/**
- * 分支 B：合成配方文本（严格 Markdown）。
- *
- * 输出约定（前端会正则解析，改动请同步 public/index.html）：
- *   · 每种有序配方：先一行 `产出：<英文ID> x<数量>`，紧跟 3 行 Markdown 表格；
- *   · 无序配方：`所需材料：a xN, b xM（无序...）`；
- *   · 熔炼：`熔炉烧炼：放入 <原料>，产出 <产物>`。
- */
-function formatRecipeMarkdown(mcData, info) {
-  const recipes = (info.itemId != null && mcData.recipes[info.itemId]) || []
-
-  // 同一种物品常有多个材料方案（工作台有 12 种木板，石镐有圆石/深板岩/黑石三种）。
-  // 排序目标：让“最常见”的方案排第一 —— 深板岩/黑石/异种木板这类冷门材料往后压，
-  // 同等冷门程度再按材料 id 升序（结果稳定，不随数据文件顺序漂移）。
-  const UNCOMMON_MATERIAL_RE = /deepslate|blackstone|cherry|bamboo|mangrove|crimson|warped|polished/
-  const variantKey = (recipe) => {
-    const ids = (recipe.inShape || []).flat().filter((id) => id != null)
-    if (ids.length === 0) return Number.MAX_SAFE_INTEGER
-    const names = ids.map((id) => (mcData.items[id] && mcData.items[id].name) || '')
-    const uncommon = names.some((name) => UNCOMMON_MATERIAL_RE.test(name)) ? 1 : 0
-    return uncommon * 1e9 + Math.min(...ids)
+  let entityHits = 0
+  for (const [name, entry] of entityByType) {
+    entityHits += entry.count
+    lines.push(`- ${labelName(name)} ×${entry.count}，最近 ${entry.nearest} 格（${directionLabel(bot, entry.at)}）`)
   }
 
-  const shaped = recipes
-    .filter((recipe) => Array.isArray(recipe.inShape))
-    .sort((a, b) => variantKey(a) - variantKey(b))
-  const shapeless = recipes.filter(
-    (recipe) => Array.isArray(recipe.ingredients) && !Array.isArray(recipe.inShape)
-  )
-  const smeltInput = SMELTING_RECIPES[info.name]
-
-  if (shaped.length === 0 && shapeless.length === 0 && !smeltInput) {
+  if (lines.length === 0) {
     return (
-      `没有找到 ${info.name} 的合成配方：它可能需要熔炼、交易、怪物掉落，` +
-      '或在特定结构（村庄/要塞/沉船）里获取。'
+      `【结构侦察】半径 ${radius} 格内没有发现床/箱子/钟/村民等村庄特征。\n` +
+      '可能原因：附近确实没有村庄，或者区块还没加载出来。\n' +
+      '建议：换一个方向 explore 走一段（约 50 格）后再侦察一次，不要原地反复扫。'
     )
   }
 
-  const zh = itemNameMap[info.name]
-  const title = zh ? `${info.name}（${zh}）` : info.name
-  const blocks = []
-
-  // 特征聚合：形状指纹相同的配方合成一组，只画一张表 + 一行“可替换材料”说明。
-  // 木镐 12 种木板、石镐 3 种石料都属同一组，不必刷 12 张一模一样的表。
-  const groups = []
-  const groupIndexOf = new Map()
-  for (const recipe of shaped) {
-    const signature = shapeSignature(recipe.inShape)
-    if (!groupIndexOf.has(signature)) {
-      groupIndexOf.set(signature, groups.length)
-      groups.push([])
-    }
-    groups[groupIndexOf.get(signature)].push(recipe)
+  let verdict = '疑似有人活动（零散结构，可能是前哨/矿洞营地）'
+  if (byName.has('bell') || entityByType.has('villager') || entityByType.has('iron_golem')) {
+    verdict = '高度疑似村庄'
+  } else if (blockHits >= 3) {
+    verdict = '可能是村庄的一部分（房屋/仓库）'
   }
 
-  const shownGroups = groups.slice(0, MAX_RECIPE_VARIANTS)
-
-  shownGroups.forEach((group, index) => {
-    const recipe = group[0]
-    const count = (recipe.result && recipe.result.count) || 1
-    const suffix = groups.length > 1 ? `（配方 ${index + 1}/${groups.length}）` : ''
-    const lines = [
-      `产出：${info.name} x${count}${suffix}`,
-      renderShapeTable(mcData, recipe.inShape)
-    ]
-    if (group.length > 1) lines.push(...describeSubstitutions(mcData, recipe, group.slice(1)))
-    blocks.push(lines.join('\n'))
-  })
-
-  if (groups.length > shownGroups.length) {
-    blocks.push(`（还有 ${groups.length - shownGroups.length} 种形状不同的配方未展开）`)
-  }
-
-  shapeless.slice(0, MAX_RECIPE_VARIANTS).forEach((recipe) => {
-    const count = (recipe.result && recipe.result.count) || 1
-    blocks.push(
-      `所需材料：${formatIngredients(mcData, recipe.ingredients)}（无序，产出 ${info.name} x${count}）`
-    )
-  })
-
-  if (smeltInput) blocks.push(`熔炉烧炼：放入 ${smeltInput}，产出 ${info.name}`)
-
-  return [`合成配方：${title}`, blocks.join('\n\n')].join('\n')
-}
-
-/** query_game_knowledge 主实现（同步，纯查表） */
-function queryGameKnowledge(bot, args) {
-  const queryType = String(args.query_type || '').trim().toLowerCase()
-  const keyword = String(args.keyword || '').trim()
-
-  const mcData = getGameData(bot)
-  if (mcData.error) return { __raw: true, text: mcData.error }
-
-  if (!keyword) {
-    return { __raw: true, text: '缺少 keyword：请传物品的英文 ID（例如 stone_pickaxe）。' }
-  }
-
-  const info = lookupGameItem(mcData, keyword)
-  if (!info) {
-    return {
-      __raw: true,
-      text:
-        `找不到物品 "${keyword}"。keyword 必须是英文 ID（例如 stone_pickaxe、oak_planks），` +
-        '不能填中文名，也不要用方块的中文译名。'
-    }
-  }
-
-  if (queryType === 'recipe') {
-    log('TOOL', `[tools] query_game_knowledge：recipe ${info.name}`)
-    return { __raw: true, text: formatRecipeMarkdown(mcData, info) }
-  }
-
-  if (queryType === 'item') {
-    log('TOOL', `[tools] query_game_knowledge：item ${info.name}`)
-    return { __raw: true, text: formatItemInfo(info) }
-  }
-
-  return {
-    __raw: true,
-    text: `query_type 只能是 item 或 recipe，收到的是 "${args.query_type}"。`
-  }
+  return (
+    `【结构侦察】半径 ${radius} 格内命中 ${blockHits} 个特征方块、${entityHits} 个实体：\n` +
+    `${lines.join('\n')}\n` +
+    `结论：${verdict}。建议朝最近的那一处移动（可用 move_to 或 explore）。`
+  )
 }
 
 // ------------------------------ 统一执行入口 ------------------------------
@@ -2962,11 +2690,18 @@ async function dispatchTool(bot, toolName, safeArgs) {
     case 'query_game_knowledge':
       return queryGameKnowledge(bot, safeArgs)
 
+    // ---- 生存与侦察 ----
+    case 'escape_danger':
+      return escapeDanger(bot)
+
+    case 'locate_structure':
+      return locateStructure(bot, safeArgs)
+
     default:
       return (
         `未知工具 "${toolName}"。可用工具：collect_resource、craft_item、` +
         `attack_entity、find_entities、interact_with_block、equip_item、drop_item、` +
-        `move_to、explore、scan_environment、get_status、query_game_knowledge`
+        `move_to、explore、scan_environment、get_status、query_game_knowledge、escape_danger、locate_structure`
       )
   }
 }
@@ -3021,11 +2756,8 @@ module.exports = {
   moveTo,
   explore,
   scanEnvironment,
-  queryGameKnowledge, // 游戏知识查询（单测直接调，不需要 bot）
-  formatRecipeMarkdown,
-  formatItemInfo,
-  lookupGameItem,
-  getGameData,
+  escapeDanger, // 逃生（单测/诊断可直接调）
+  locateStructure,
   detectDangerNearby,
   countInInventory,
   checkDigCapability,

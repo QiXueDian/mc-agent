@@ -150,12 +150,8 @@ module.exports = {
   describeError,
   cleanContent,
   hasSpecialToken,
-  // DSML 词法：loop.js 的解析正则必须复用这些片段，禁止再手写竖线
-  DSML_PIPE,
+  // DSML 词法：只有 loop.js 的解析正则需要这三个（其余片段仅在 cleanContent 内部使用）
   DSML_OPEN,
   DSML_CLOSE,
-  DSML_KEYWORD,
-  DSML_TEXT_RE,
-  DSML_BLOCK_RE,
-  DSML_TAG_RE
+  DSML_TEXT_RE
 }

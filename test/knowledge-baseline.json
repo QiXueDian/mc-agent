@@ -1,0 +1,10 @@
+{
+  "cases": {
+    "recipe:wooden_pickaxe": "合成配方：wooden_pickaxe（木镐）\n产出：wooden_pickaxe x1\n| oak_planks | oak_planks | oak_planks |\n| --- | --- | --- |\n| 空 | stick | 空 |\n| 空 | stick | 空 |\n注：图中的 oak_planks 可以替换为任意木板（如 spruce_planks、birch_planks、jungle_planks、acacia_planks、dark_oak_planks 等 11 种，效果完全相同）。",
+    "recipe:crafting_table": "合成配方：crafting_table（工作台）\n产出：crafting_table x1\n| oak_planks | oak_planks | 空 |\n| --- | --- | --- |\n| oak_planks | oak_planks | 空 |\n| 空 | 空 | 空 |\n注：图中的 oak_planks 可以替换为任意木板（如 spruce_planks、birch_planks、jungle_planks、acacia_planks、dark_oak_planks 等 11 种，效果完全相同）。",
+    "recipe:iron_ingot": "合成配方：iron_ingot（铁锭）\n产出：iron_ingot x1\n| iron_nugget | iron_nugget | iron_nugget |\n| --- | --- | --- |\n| iron_nugget | iron_nugget | iron_nugget |\n| iron_nugget | iron_nugget | iron_nugget |\n\n所需材料：iron_block x1（无序，产出 iron_ingot x9）\n\n熔炉烧炼：放入 raw_iron，产出 iron_ingot",
+    "recipe:stone_pickaxe": "合成配方：stone_pickaxe（石镐）\n产出：stone_pickaxe x1\n| cobblestone | cobblestone | cobblestone |\n| --- | --- | --- |\n| 空 | stick | 空 |\n| 空 | stick | 空 |\n注：图中的 cobblestone 可以替换为其他同类材料（如 cobbled_deepslate、blackstone，效果完全相同）。",
+    "item:diamond_pickaxe": "物品：钻石镐（diamond_pickaxe）\n最大堆叠：1\n最大耐久：1561"
+  },
+  "toolCount": 14
+}

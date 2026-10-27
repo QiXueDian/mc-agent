@@ -143,7 +143,19 @@ console.log('\n' + '-'.repeat(64))
 if (failures.length > 0) {
   console.log(`✘ 失败 ${failures.length} 个 / 通过 ${passed} 个`)
   for (const name of failures) console.log(`   - ${name}`)
-  process.exitCode = 1
 } else {
   console.log(`✔ 全部通过：${passed} 个用例`)
 }
+
+// ---------------------------------------------------------------------- 退出
+/**
+ * 必须显式退出，不能让 Node 自己“自然结束”。
+ *
+ * 原因：本文件 require('../src/agent/loop')，而 loop.js 顶部 require 了
+ * ../bot/connection —— 那个模块**加载即拨号**（connection.js 的 module.exports
+ * 里 `bot: getBot()`），并且断线后会一直 setTimeout 重连。
+ * 这些句柄/定时器不会自己消失，事件循环永远有活儿，进程就挂住终端不还提示符。
+ *
+ * 这里只测纯函数，没有需要优雅收尾的资源；直接按断言结果给出退出码。
+ */
+process.exit(failures.length > 0 ? 1 : 0)
