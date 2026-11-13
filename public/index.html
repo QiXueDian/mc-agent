@@ -610,6 +610,59 @@
 
     #stop:hover { background: #d64535; transform: translateY(-1px); }
     #stop[hidden] { display: none; }
+
+    /* ---------------- 访问令牌（.env 里设置了 ACCESS_TOKEN 时才出现） ---------------- */
+    .auth-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(255, 196, 87, 0.08);
+      font-size: 12px;
+      color: #f0c674;
+    }
+
+    .auth-bar[hidden] { display: none; }
+
+    .auth-bar input {
+      flex: 1;
+      min-width: 0;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      background: rgba(0, 0, 0, 0.28);
+      color: #e6e8ee;
+      font-family: inherit;
+      font-size: 12px;
+    }
+
+    .auth-bar button {
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.08);
+      color: #e6e8ee;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .auth-bar button:hover { background: rgba(255, 255, 255, 0.16); }
+
+    .auth-msg { color: #ff8f7a; }
+
+    /* ---------------- 版本数据告警 ---------------- */
+    .data-warn {
+      padding: 9px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(255, 120, 90, 0.12);
+      color: #ff9f85;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .data-warn[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -619,6 +672,17 @@
       <div id="status"><span class="dot" id="dot"></span><span id="statusText">空闲</span></div>
       <select id="personaSelect" class="persona-select" title="切换 Agent 说话风格"></select>
     </header>
+
+    <!-- 版本自检告警：minecraft-data 与服务器版本对不上时出现（由 /api/health 的 gameData 驱动） -->
+    <section id="dataWarn" class="data-warn" hidden></section>
+
+    <!-- 访问令牌：仅当服务端 .env 设置了 ACCESS_TOKEN 时出现（值只存在浏览器 localStorage） -->
+    <section id="authBar" class="auth-bar" hidden>
+      <span>🔑</span>
+      <input id="tokenInput" type="password" placeholder="请输入 .env 里的 ACCESS_TOKEN" autocomplete="off" />
+      <button id="tokenSave" type="button">解锁</button>
+      <span id="tokenMsg" class="auth-msg"></span>
+    </section>
 
     <!-- AI 第一人称视角：地址由 /api/health 下发，前端不硬编码端口 -->
     <section id="viewer" class="viewer">
@@ -684,6 +748,88 @@
     const statusText = document.getElementById('statusText')
     const dot = document.getElementById('dot')
     const emptyHint = document.getElementById('emptyHint')
+    const authBar = document.getElementById('authBar')
+    const dataWarn = document.getElementById('dataWarn')
+    const tokenInput = document.getElementById('tokenInput')
+    const tokenSave = document.getElementById('tokenSave')
+    const tokenMsg = document.getElementById('tokenMsg')
+
+    // ==================== 访问令牌 ====================
+    /**
+     * 服务端 .env 的 ACCESS_TOKEN 会拦住所有 /api/*（/api/health 除外）。
+     * 前端只做两件事：把令牌存在 localStorage，然后每个请求带上。
+     * 注意 EventSource 不能自定义请求头，所以 SSE 走 ?token= 查询参数。
+     */
+    const TOKEN_KEY = 'mc-agent-token'
+    let booted = false
+    let lastHealth = null // 复用 ensureAuth 那次 health 请求，避免重复拉取
+
+    const getToken = () => localStorage.getItem(TOKEN_KEY) || ''
+
+    function authHeaders(base = {}) {
+      const token = getToken()
+      return token ? { ...base, 'x-access-token': token } : { ...base }
+    }
+
+    /** 带令牌的 fetch；401 时把令牌条亮出来，避免用户对着“没反应”发呆 */
+    async function apiFetch(url, options = {}) {
+      const res = await fetch(url, { ...options, headers: authHeaders(options.headers) })
+      if (res.status === 401) {
+        showAuthBar('令牌无效或已过期，请重新输入')
+        tokenInput.value = ''
+        tokenInput.focus()
+      }
+      return res
+    }
+
+    /** 给 URL 挂上令牌（EventSource / iframe 这类只能用 URL 的场合） */
+    function withToken(url) {
+      const token = getToken()
+      if (!token) return url
+      return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token)
+    }
+
+    function showAuthBar(message) {
+      authBar.hidden = false
+      tokenMsg.textContent = message || ''
+    }
+
+    function hideAuthBar() {
+      authBar.hidden = true
+      tokenMsg.textContent = ''
+    }
+
+    /**
+     * 启动前确认令牌可用：
+     *   · 服务端没开令牌 → 直接放行；
+     *   · 本地有令牌 → 用一个轻量接口试一次；
+     *   · 本地没令牌 → 亮出输入条，等用户输入后再 boot()。
+     */
+    async function ensureAuth() {
+      let health = {}
+      try {
+        const res = await fetch('/api/health')
+        health = await res.json()
+        lastHealth = health
+      } catch (_) {
+        /* 服务没起来时交给后续请求报错 */
+        return true
+      }
+
+      if (!health.authRequired) {
+        hideAuthBar()
+        return true
+      }
+
+      if (!getToken()) {
+        showAuthBar('面板已启用访问令牌，请输入 .env 里的 ACCESS_TOKEN')
+        tokenInput.focus()
+        return false
+      }
+
+      const probe = await apiFetch('/api/personas')
+      return probe.ok
+    }
 
     // ==================== 状态 ====================
     let eventSource = null // 当前 SSE 连接
@@ -731,7 +877,7 @@
     /** 请求后端中断当前任务（幂等，没有任务时后端返回 stopped:false） */
     async function requestStop() {
       try {
-        await fetch('/api/agent/stop', { method: 'POST' })
+        await apiFetch('/api/agent/stop', { method: 'POST' })
       } catch (err) {
         console.warn('停止请求失败（忽略）：', err)
       }
@@ -816,6 +962,7 @@
     const ITEM_TEXTURE_BASE = `${ASSET_BASE_URL}/item/`
     const BLOCK_TEXTURE_BASE = `${ASSET_BASE_URL}/block/`
     const EMPTY_CELL = '空'
+    const UNKNOWN_CELL = '未知物品' // 后端遇到当前版本不存在的材料时会写这个占位
     const TABLE_SEP_RE = /^\|(\s*:?-{2,}:?\s*\|)+\s*$/
     const PRODUCT_RE = /产出\s*[:：]\s*([A-Za-z0-9_]+)\s*[x×]\s*(\d+)/
 
@@ -842,6 +989,16 @@
       const clean = String(name || '').trim()
       if (clean === '' || clean === EMPTY_CELL) {
         slot.classList.add('empty')
+        return slot
+      }
+
+      // 版本不匹配 / 模组配方的占位：不拿中文去拼贴图 URL（否则白跑两次 404）
+      if (clean === UNKNOWN_CELL) {
+        slot.classList.add('fallback')
+        const unknown = document.createElement('span')
+        unknown.className = 'slot-name'
+        unknown.textContent = clean
+        slot.appendChild(unknown)
         return slot
       }
 
@@ -1051,8 +1208,9 @@
       inputEl.value = ''
       setBusy(true)
 
-      // 关键：EventSource 只能 GET，参数必须放在 query 里并做 URL 编码
-      const url = '/api/agent?message=' + encodeURIComponent(message)
+      // 关键：EventSource 只能 GET，参数必须放在 query 里并做 URL 编码；
+      // 访问令牌同理（EventSource 不支持自定义请求头）
+      const url = withToken('/api/agent?message=' + encodeURIComponent(message))
       eventSource = new EventSource(url)
 
       // 收到任意一条 SSE 消息（服务端格式：data: {...}\n\n）
@@ -1197,6 +1355,9 @@
         const res = await fetch('/api/health')
         const health = await res.json()
         viewer = health.viewer || {}
+        // 重连 / 换服后版本可能变了，顺手刷新一次告警
+        lastHealth = health
+        showDataWarning(health.gameData)
       } catch (err) {
         console.error('获取 AI 视角配置失败', err)
         setViewerState('连接失败', 'fail')
@@ -1281,7 +1442,7 @@
       setViewerState('切换中…', '')
 
       try {
-        const res = await fetch('/api/viewer/mode', {
+        const res = await apiFetch('/api/viewer/mode', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ firstPerson: target })
@@ -1398,7 +1559,9 @@
       if (document.hidden) return
 
       try {
-        const res = await fetch('/api/bot/hud')
+        const res = await apiFetch('/api/bot/hud')
+        // 令牌没解锁前不刷 HUD，避免把 401 当成“机器人掉线”置灰
+        if (!res.ok) return
         const hud = await res.json()
 
         if (!hud || !hud.ready) {
@@ -1448,7 +1611,8 @@
     /** 拉一次风格列表，填充 <select> */
     async function loadPersonas() {
       try {
-        const res = await fetch('/api/personas')
+        const res = await apiFetch('/api/personas')
+        if (!res.ok) return // 401 已经由 apiFetch 提示，交给用户输令牌
         const data = await res.json()
         const list = Array.isArray(data.personas) ? data.personas : []
 
@@ -1481,7 +1645,7 @@
       personaSelect.disabled = true
 
       try {
-        const res = await fetch('/api/persona', {
+        const res = await apiFetch('/api/persona', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: targetId })
@@ -1502,12 +1666,6 @@
       }
     })
 
-    // 初始化：默认展开；用户手动收起过就保持收起
-    applyViewerCollapsed(localStorage.getItem(VIEWER_COLLAPSED_KEY) === '1')
-    if (!viewerEl.classList.contains('collapsed')) loadViewer()
-    startHud()
-    loadPersonas()
-
     // ==================== 事件绑定 ====================
     sendBtn.addEventListener('click', sendMessage)
     if (stopBtn) stopBtn.addEventListener('click', stopGeneration)
@@ -1519,7 +1677,76 @@
       }
     })
 
-    inputEl.focus()
+    tokenSave.addEventListener('click', async () => {
+      const value = tokenInput.value.trim()
+      if (!value) {
+        tokenMsg.textContent = '令牌不能为空'
+        return
+      }
+
+      localStorage.setItem(TOKEN_KEY, value)
+      tokenSave.disabled = true
+      const ok = await ensureAuth()
+      tokenSave.disabled = false
+
+      if (ok) {
+        hideAuthBar()
+        tokenInput.value = ''
+        boot()
+      }
+    })
+
+    tokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault()
+        tokenSave.click()
+      }
+    })
+
+    /**
+     * 版本数据自检告警。
+     * 服务端 spawn 时已经用核心物品探针验过 minecraft-data，
+     * 这里只负责把结果翻译成玩家能看懂的一句话。
+     */
+    function showDataWarning(gameData) {
+      if (!dataWarn) return
+
+      if (!gameData || gameData.ok !== false) {
+        dataWarn.hidden = true
+        dataWarn.textContent = ''
+        return
+      }
+
+      const version = gameData.version || '未知'
+      const reason = gameData.reason ? `原因：${gameData.reason}。` : ''
+      dataWarn.textContent = `⚠️ 当前版本（v${version}）数据加载异常，部分合成表可能无法显示。${reason}`
+      dataWarn.hidden = false
+    }
+
+    /**
+     * 真正的初始化：令牌确认通过后才拉数据。
+     * 否则页面一打开就会刷一屏 401，HUD 还会被误判成“机器人掉线”。
+     */
+    function boot() {
+      if (booted) return
+      booted = true
+
+      // 默认展开；用户手动收起过就保持收起
+      applyViewerCollapsed(localStorage.getItem(VIEWER_COLLAPSED_KEY) === '1')
+      if (!viewerEl.classList.contains('collapsed')) loadViewer()
+      startHud()
+      loadPersonas()
+
+      // 版本自检结果（ensureAuth 已经拉过一次 health，这里直接复用）
+      showDataWarning(lastHealth && lastHealth.gameData)
+
+      inputEl.focus()
+    }
+
+    // 启动流程：先确认令牌（服务端没开令牌时直接放行）
+    ;(async () => {
+      if (await ensureAuth()) boot()
+    })()
   </script>
 </body>
 </html>

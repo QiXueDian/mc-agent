@@ -41,20 +41,29 @@ function sanitizeHistory(history) {
 }
 
 /**
- * 把一行生存状态贴到最后一条 role:tool 消息的末尾（零新增消息、零额外 token 条数）。
+ * 状态行标记：新旧两代格式都要认，否则升级后同一条消息里会叠出两份状态。
+ *   · `[当前状态:` —— 每条 tool 结果末尾的极简面板（当前版本）
+ *   · `【生存状态` —— 旧版每步一贴的长状态行（保留兼容）
+ */
+const STATUS_MARKERS = ['[当前状态', '【生存状态']
+
+/**
+ * 把一行状态贴到最后一条 role:tool 消息的末尾（零新增消息、零额外 token 条数）。
  *
  * 为什么“先剥再贴”：同一轮里若模型连续两次没产生新的工具结果（格式纠错 continue），
- * 上一次贴的状态还留在那条消息里，直接追加会越滚越长。这里按标记把旧行截掉再重贴。
+ * 上一次贴的状态还留在那条消息里，直接追加会越滚越长。这里按标记把旧行截掉再重贴，
+ * 保证任何时刻一条 tool 消息里只有**一份**最新状态。
  * 没有 tool 消息（第 1 步）时返回 false，初始状态交给 system prompt 覆盖。
  */
-function attachSurvivalLine(messages, line) {
+function attachStatusLine(messages, line) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
     if (!message || message.role !== 'tool') continue
-    const base = String(message.content || '')
-      .split('【生存状态')
-      .shift()
-      .trimEnd()
+
+    let base = String(message.content || '')
+    for (const marker of STATUS_MARKERS) base = base.split(marker).shift()
+    base = base.trimEnd()
+
     message.content = base ? `${base}\n${line}` : line
     return true
   }
@@ -63,5 +72,6 @@ function attachSurvivalLine(messages, line) {
 module.exports = {
   MAX_HISTORY_MESSAGES,
   sanitizeHistory,
-  attachSurvivalLine
+  attachStatusLine,
+  attachSurvivalLine: attachStatusLine // 兼容旧名字（历史调用点）
 }

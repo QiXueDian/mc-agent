@@ -147,24 +147,41 @@ function localizeText(text) {
 }
 
 /**
- * “材料不足”时的冶炼提示：目标物品 → 真正该烧的原料。
- * craft_item 只走配方系统，找不到冶炼路径，模型就会一直纠结“缺 iron_block”，
- * 提前把“该去熔炉”的结论说出来，能省掉好几步无效思考。
+ * “材料不足”时的冶炼提示：目标物品 → 真正该烧的原料**候选**。
+ *
+ * 为什么是数组：原料随版本变化极大 ——
+ *   1.12.2 没有 raw_iron / raw_gold，铁矿石直接烧成铁锭；
+ *   1.16.5 有 raw_iron 但没有 raw_gold；1.20+ 才有 raw_gold。
+ * 使用前必须用 resolveSmeltSource 按当前连接版本的 registry 过滤，
+ * 过滤后为空就**不提**“去熔炉”这个建议（宁可少说，也不能指错路）。
  */
-const SMELTING_SOURCE = {
-  iron_ingot: 'raw_iron',
-  gold_ingot: 'raw_gold',
-  copper_ingot: 'raw_copper',
-  glass: 'sand',
-  stone: 'cobblestone',
-  charcoal: 'oak_log',
-  brick: 'clay_ball'
+const SMELTING_SOURCE_CANDIDATES = {
+  iron_ingot: ['raw_iron', 'iron_ore'],
+  gold_ingot: ['raw_gold', 'gold_ore'],
+  copper_ingot: ['raw_copper', 'copper_ore'],
+  glass: ['sand'],
+  stone: ['cobblestone'],
+  charcoal: ['oak_log', 'log'],
+  brick: ['clay_ball']
+}
+
+/**
+ * 按当前版本挑一个真实存在的冶炼原料。
+ * @returns {string} 存在的原料名；一个都没有则返回空串
+ */
+function resolveSmeltSource(bot, itemName) {
+  const list = SMELTING_SOURCE_CANDIDATES[itemName]
+  if (!Array.isArray(list)) return ''
+  if (!bot || !bot.registry || !bot.registry.itemsByName) return ''
+  return list.find((name) => Boolean(bot.registry.itemsByName[name])) || ''
 }
 
 // ------------------------------ 公共工具函数（统一从 utils 引入，避免重复实现） ------------------------------
 const { sleep, withTimeout, formatPos, describeError, log } = require('./utils')
 // 生存判定与 loop.js 共用同一套阈值，避免“循环里说缺氧、工具里说没缺氧”这种自相矛盾
 const { readSurvivalState, formatSurvivalLine } = require('./survival')
+// 空间记忆：地标坐标持久化到项目根目录的 waypoints.json（只依赖 fs，无环）
+const waypoints = require('./waypoints')
 
 /** 根据方块名猜一个“该用什么工具”的提示词，用于给大模型看的失败原因 */
 function guessToolHint(blockName) {
@@ -220,7 +237,8 @@ const toolDefinitions = [
       name: 'get_status',
       description:
         '获取机器人当前状态：坐标、维度、血量、饥饿值、手上物品、背包占用格数与物品种类数、背包清单。不需要参数。' +
-        '背包快满时会附带提醒——看到提醒就先用 drop_item 清理，否则捡不起新掉落物。',
+        '背包快满时会附带提醒——看到提醒就先用 drop_item 清理，否则捡不起新掉落物。' +
+        '饥饿值不满时会额外列出背包里能吃的食物，想吃就用 eat_item。',
       parameters: {
         type: 'object',
         properties: {},
@@ -460,22 +478,29 @@ const toolDefinitions = [
     function: {
       name: 'query_game_knowledge',
       description:
-        '【游戏知识查询】查询 Minecraft 官方数据（minecraft-data）：物品属性与合成/熔炼配方。\n' +
-        '当玩家问“怎么做某物品”“某物品有什么用/能干什么”时**必须先调用本工具**，不要凭记忆回答。\n' +
-        'query_type=item 查物品属性（堆叠上限、最大耐久）；query_type=recipe 查合成配方。\n' +
-        'keyword 必须是物品的英文 ID（例如 stone_pickaxe、torch），不能填中文名。\n' +
+        '【游戏知识查询】查询 Minecraft 数据：物品属性、合成/熔炼配方、生物信息、掉落物、机制攻略。\n' +
+        '当玩家问“怎么做某物品”“某物品有什么用/能干什么”“僵尸掉什么”“铁矿石挖了掉什么”' +
+        '“怎么附魔 / 怎么驯服猫 / 下界怎么去”时**必须先调用本工具**，不要凭记忆回答。\n' +
+        'query_type 取值：\n' +
+        '  · item   = 物品属性（堆叠上限、最大耐久）\n' +
+        '  · recipe = 合成配方（严格 3x3 Markdown）\n' +
+        '  · entity = 生物信息（分类、基础血量、体型、掉落物）\n' +
+        '  · loot   = 掉落物（方块区分普通挖掘/精准采集；也接受生物名）\n' +
+        '  · wiki   = 联网检索 minecraft.wiki（机制、攻略、版本内容），返回 3 条摘要\n' +
+        'keyword 用英文 ID（stone_pickaxe、iron_ore、zombie）或中文名（铁矿石、僵尸）都行。\n' +
         '注意：recipe 返回的 3x3 表格是 Markdown 格式，最终回复里必须**原样保留**，前端会自动渲染成图形。',
       parameters: {
         type: 'object',
         properties: {
           query_type: {
             type: 'string',
-            enum: ['item', 'recipe'],
-            description: 'item = 查物品属性；recipe = 查合成/熔炼配方'
+            enum: ['item', 'recipe', 'entity', 'loot', 'wiki'],
+            description:
+              'item = 物品属性；recipe = 合成配方；entity = 生物信息与掉落；loot = 方块/生物掉落；wiki = 联网查机制攻略'
           },
           keyword: {
             type: 'string',
-            description: '物品的英文 ID，例如 stone_pickaxe、oak_planks、torch'
+            description: '物品/方块/生物的英文 ID 或中文名，机制类问题填中文关键词，例如附魔、驯服猫、下界'
           }
         },
         required: ['query_type', 'keyword'],
@@ -518,6 +543,113 @@ const toolDefinitions = [
           }
         },
         required: [],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'save_waypoint',
+      description:
+        '【记住地点】把当前位置（或指定坐标）存成地标，写入本地 waypoints.json —— 重启、刷新页面都还在。\n' +
+        '什么时候必须用：安家/建房子、发现村庄或矿洞、找到出生点、发现要塞，都主动存一个。\n' +
+        'x/y/z 可以省略，省略时用机器人当前坐标（最常用）；同名地标会被更新而不是重复添加。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 24,
+            description: '地标名，例如 家、村庄、铁矿洞、出生点'
+          },
+          x: { type: 'number', description: 'X 坐标；省略 = 机器人当前位置' },
+          y: { type: 'number', description: 'Y 坐标；省略 = 机器人当前位置' },
+          z: { type: 'number', description: 'Z 坐标；省略 = 机器人当前位置' }
+        },
+        required: ['name'],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'go_to_waypoint',
+      description:
+        '【按地标前往】读取 waypoints.json，自动寻路到之前记住的地标。\n' +
+        '玩家说“回家”“去村庄”“回矿洞”时必须用它，不要凭记忆和坐标瞎走。\n' +
+        '如果地标在另一个维度（下界/末地），工具会明确告诉你跨维度无法直接寻路。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 24,
+            description: '地标名，例如 家、村庄、铁矿洞'
+          }
+        },
+        required: ['name'],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'eat_item',
+      description:
+        '【进食回血】吃背包里的食物，把饥饿值补回来（饥饿值满 20 时无法进食，会直接返回“已经吃饱”）。\n' +
+        '用途：血量低且饥饿值不满时先吃东西；饥饿值 ≤ 6 时无法奔跑，赶路前也应该先吃。\n' +
+        '规则：\n' +
+        '1) item_name 留空 → 自动从背包里挑“饱食度收益最高”的食物；\n' +
+        '2) count 是“最多吃几个”，吃饱就提前停，不会浪费；\n' +
+        '3) 不要吃河豚(pufferfish)、腐肉(rotten_flesh)、蜘蛛眼(spider_eye)、毒马铃薯(poisonous_potato) 这类有毒食物，除非饿到快死。',
+      parameters: {
+        type: 'object',
+        properties: {
+          item_name: {
+            type: 'string',
+            description: '要吃的食物英文 ID，例如 bread、cooked_beef、apple；留空则自动挑选'
+          },
+          count: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 16,
+            description: '最多吃几个，默认 1；吃饱会提前停止'
+          }
+        },
+        required: [],
+        additionalProperties: false
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'smelt_item',
+      description:
+        '【熔炉冶炼】把矿石/原料放进熔炉烧成成品，这是“铁锭(iron_ingot)、金锭、玻璃(glass)、木炭(charcoal)”的唯一来源。\n' +
+        '自动完成：找熔炉（没有就把背包里的 furnace 放下来）→ 放原料 → 放燃料（煤炭/木炭优先，其次木板/原木）→ 等待烧炼 → 取出产物。\n' +
+        '参数 item_name 填**烧出来的产物**（例如 iron_ingot，不是 raw_iron），count 是想要的数量。\n' +
+        '注意：原料和燃料都必须已经在背包里；缺煤炭就先 collect_resource 挖 coal_ore，缺熔炉就先 craft_item 合成 furnace（8 个圆石）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          item_name: {
+            type: 'string',
+            description: '烧出来的产物英文 ID，例如 iron_ingot、gold_ingot、glass、charcoal、stone'
+          },
+          count: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 32,
+            description: '想要烧出几个，默认 1'
+          }
+        },
+        required: ['item_name'],
         additionalProperties: false
       }
     }
@@ -634,12 +766,18 @@ function checkDigCapability(bot, block) {
   return { ok: true, tool }
 }
 
-/** 装备工具（失败不影响后续尝试，只打日志） */
+/**
+ * 装备工具（失败不影响后续尝试，只打日志）。
+ *
+ * 必须带超时：try/catch 只能接住“抛出来的异常”，接不住“永不 resolve”的 Promise。
+ * bot.equip 依赖服务端窗口刷新，网络抖动或界面卡住时会一直挂着，
+ * 而调用方（digOneBlock）正在 await 它 —— 没有超时就是 ReAct 循环整体死锁。
+ */
 async function equipTool(bot, tool) {
   if (!tool) return
   if (bot.heldItem && bot.heldItem.name === tool.name) return
   try {
-    await bot.equip(tool, 'hand')
+    await withTimeout(bot.equip(tool, 'hand'), EQUIP_TIMEOUT, `装备 ${tool.name}`)
   } catch (err) {
     log('WARN',`[tools] 装备 ${tool.name} 失败：${describeError(err)}`)
   }
@@ -702,8 +840,9 @@ async function smartPickup(bot, blockName, beforeCount) {
 
   // 4) 走过去（半径 1 即方块中心，触发拾取判定）
   try {
-    await withTimeout(
-      bot.pathfinder.goto(new GoalNear(drop.position.x, drop.position.y, drop.position.z, 1)),
+    await gotoOrThrow(
+      bot,
+      new GoalNear(drop.position.x, drop.position.y, drop.position.z, 1),
       PICKUP_TIMEOUT,
       '走向掉落物'
     )
@@ -762,13 +901,11 @@ async function digOneBlock(bot, blockName, blockId, target) {
     // 2.3 寻路靠近（半径 2：方块本身占位，半径 1 常常无解）
     if (!inReach) {
       try {
-        await withTimeout(
-          bot.pathfinder.goto(new GoalNear(pos.x, pos.y, pos.z, 2)),
-          GOTO_TIMEOUT,
-          '靠近方块'
-        )
+        // gotoOrThrow 超时会先 pathfinder.stop() 再抛：否则下一步 bot.dig
+        // 会和后台还在跑的寻路抢控制权（挖到一半被拖走）
+        await gotoOrThrow(bot, new GoalNear(pos.x, pos.y, pos.z, 2), GOTO_TIMEOUT, '靠近方块')
       } catch (err) {
-        // 寻路失败不致命：可能已经在边上，也可能只是算路超时
+        // 寻路失败不致命：可能已经在边上，也可能只是算路超时（此时已刹车）
         log('WARN',`[tools] 靠近 ${formatPos(pos)} 失败：${describeError(err)}`)
       }
     }
@@ -1070,7 +1207,9 @@ async function placeCraftingTable(bot, tableItem) {
 
     if (spot) {
       try {
-        await bot.equip(tableItem, 'hand')
+        // 必须带超时：equip 依赖服务端窗口刷新，卡住时 Promise 可能永不 settle，
+        // 会把整个 ReAct 循环挂死（没有全局任务超时兜底）
+        await withTimeout(bot.equip(tableItem, 'hand'), EQUIP_TIMEOUT, '装备工作台')
         // placeBlock(贴附方块, 方向向量)：在 ground 上方一格放置手中的方块
         await withTimeout(bot.placeBlock(spot.reference, spot.face), 5000, '放置工作台')
         await sleep(300)
@@ -1089,11 +1228,7 @@ async function placeCraftingTable(bot, tableItem) {
     if (attempt === 1) {
       const p = bot.entity.position
       try {
-        await withTimeout(
-          bot.pathfinder.goto(new GoalNear(p.x + 3, p.y, p.z, 2)),
-          15000,
-          '寻找可放置的空地'
-        )
+        await gotoOrThrow(bot, new GoalNear(p.x + 3, p.y, p.z, 2), 15000, '寻找可放置的空地')
       } catch (err) {
         log('WARN',`[tools] 移动到空地失败：${describeError(err)}`)
       }
@@ -1112,10 +1247,9 @@ async function ensureCraftingTableInReach(bot) {
   const existing = findNearbyCraftingTable(bot)
   if (existing) {
     try {
-      await withTimeout(
-        bot.pathfinder.goto(
-          new GoalNear(existing.position.x, existing.position.y, existing.position.z, 2)
-        ),
+      await gotoOrThrow(
+        bot,
+        new GoalNear(existing.position.x, existing.position.y, existing.position.z, 2),
         GOTO_TIMEOUT,
         '走向工作台'
       )
@@ -1165,7 +1299,11 @@ async function craftItem(bot, args = {}) {
 
     const item = bot.registry.itemsByName[itemName]
     if (!item) {
-      return `合成失败：物品 ID "${itemName}" 不存在，请使用英文 ID（如 oak_planks、crafting_table、wooden_pickaxe）`
+      return (
+        `合成失败：当前版本（v${bot.version || '未知'}）未找到物品 "${itemName}"，` +
+        '可能是模组物品、该版本不存在，或 ID 拼错（例如 1.12.2 用 log 而不是 oak_log）。' +
+        '请用英文 ID（oak_planks、crafting_table、wooden_pickaxe）。'
+      )
     }
 
     const target = Math.min(Math.floor(rawCount), 64)
@@ -1190,7 +1328,11 @@ async function craftItem(bot, args = {}) {
         const allRecipes = bot.recipesAll(item.id, null, tableBlock || CRAFT_TABLE_FLAG)
 
         if (allRecipes.length === 0) {
-          return `无法合成 ${itemName}：这个物品没有可用的合成配方（可能需要熔炉冶炼，或物品 ID 写错了）。`
+          return (
+            `无法合成 ${itemName}：当前版本（v${bot.version || '未知'}）里它没有可用的合成配方。` +
+            '如果它是铁锭/金锭/玻璃/木炭这类产物，请改用 smelt_item 放进熔炉烧；' +
+            '也可能是模组物品或版本差异（例如 1.12.2 没有某些新方块）。'
+          )
         }
 
         const needsTable = allRecipes.every((r) => r.requiresTable)
@@ -1211,9 +1353,9 @@ async function craftItem(bot, args = {}) {
 
         // 有些“材料不足”其实是路径错了：铁锭/玻璃这类主要靠熔炉冶炼，
         // 用合成配方去找只会找到 iron_block → 9 锭这种歪门邪道，浪费一步思考。
-        const smeltFrom = SMELTING_SOURCE[itemName]
+        const smeltFrom = resolveSmeltSource(bot, itemName)
         const smeltHint = smeltFrom
-          ? `（提示：${labelName(itemName)} 通常是把 ${labelName(smeltFrom)} 放进熔炉烧出来的，当前工具集没有熔炼能力）`
+          ? `（提示：${labelName(itemName)} 主要靠熔炉冶炼，请先 collect_resource 拿到 ${labelName(smeltFrom)}，再用 smelt_item 烧出来）`
           : ''
 
         return (
@@ -1337,10 +1479,23 @@ function getStatus(bot) {
       ? `⚠️ 背包快满了，捡不起新掉落物，请先用 drop_item 丢弃泥土(dirt)/砂砾(gravel) 这类低价值方块`
       : ''
 
+  // 饥饿值不满时，把“背包里有什么能吃的”直接摆出来：
+  // 否则模型知道自己饿了，却不知道有没有食物，只能盲猜或干饿着。
+  const foods = listCarriedFoods(bot)
+  const foodText = [...foods.reduce((map, item) => map.set(item.name, (map.get(item.name) || 0) + item.count), new Map())]
+    .map(([name, count]) => `${labelName(name)} x${count}`)
+    .join('、')
+  const eatHint =
+    food < 20 && foods.length > 0
+      ? `🍗 饥饿值未满，背包有食物（${foodText}），需要时可以调用 eat_item 进食`
+      : food < 20
+        ? '🍗 饥饿值未满，但背包里没有食物，别硬扛：先去打猎或采集'
+        : ''
+
   return (
     `当前坐标 ${formatPos(pos)}，所在维度 ${bot.game.dimension}；` +
     `血量 ${health}/20，饥饿值 ${food}/20；手上拿着 ${held}；` +
-    `${capacity}；背包：${bagText}${fullHint ? `。${fullHint}` : ''}`
+    `${capacity}；背包：${bagText}${fullHint ? `。${fullHint}` : ''}${eatHint ? `。${eatHint}` : ''}`
   )
 }
 
@@ -1494,7 +1649,11 @@ function weaponScore(itemName) {
   return 0
 }
 
-/** 装备背包里攻击力最高的武器；没有武器则保持现状（空手也能打） */
+/**
+ * 装备背包里攻击力最高的武器；没有武器则保持现状（空手也能打）。
+ *
+ * 与 equipTool 同理：超时后降级为“空手照样打”，绝不能让攻击流程卡在装备上。
+ */
 async function equipBestWeapon(bot) {
   const weapons = bot.inventory.items().filter((item) => weaponScore(item.name) > 0)
   if (weapons.length === 0) return null
@@ -1505,7 +1664,7 @@ async function equipBestWeapon(bot) {
   if (bot.heldItem && bot.heldItem.name === best.name) return best
 
   try {
-    await bot.equip(best, 'hand')
+    await withTimeout(bot.equip(best, 'hand'), EQUIP_TIMEOUT, `装备武器 ${best.name}`)
     log('TOOL', `[tools] 已装备武器 ${best.name}`)
     return best
   } catch (err) {
@@ -1575,10 +1734,9 @@ async function attackEntity(bot, args = {}) {
         // 单次寻路不能超过“剩余总时限”，否则一次 20s 超时就把整个 30s 预算吃光
         const remaining = Math.max(2000, deadline - Date.now())
         try {
-          await withTimeout(
-            bot.pathfinder.goto(
-              new GoalNear(target.position.x, target.position.y, target.position.z, 2)
-            ),
+          await gotoOrThrow(
+            bot,
+            new GoalNear(target.position.x, target.position.y, target.position.z, 2),
             Math.min(ATTACK_APPROACH_TIMEOUT, remaining),
             '靠近目标'
           )
@@ -1825,6 +1983,521 @@ async function dropItem(bot, args = {}) {
   }
 }
 
+// ------------------------------ eat_item ------------------------------
+/**
+ * 进食（eat_item）。
+ *
+ * 为什么必须有这个工具：CORE 提示词的【安全规则】一直写着“血量低就吃东西回血”，
+ * 但早期版本根本没有进食能力 —— 模型只能反复 get_status，或者干脆编造“我吃了”。
+ * 这里把口号变成真动作：装备 → bot.consume() → 用背包差值核对真实吃下几个。
+ */
+const TOXIC_FOODS = new Set([
+  'pufferfish',
+  'rotten_flesh',
+  'spider_eye',
+  'poisonous_potato',
+  'suspicious_stew',
+  'chorus_fruit'
+])
+const MAX_EAT_COUNT = 16
+const EAT_TIMEOUT = 12000
+const EAT_SETTLE = 250
+
+/** 食物表来自 minecraft-data（foodsByName），不同版本自动对齐 */
+function getFoodTable(bot) {
+  return (bot.registry && bot.registry.foodsByName) || {}
+}
+
+/** 背包里的食物（按物品名去重前的原始堆叠） */
+function listCarriedFoods(bot) {
+  const table = getFoodTable(bot)
+  if (!bot.inventory) return []
+  return bot.inventory.items().filter((item) => table[item.name])
+}
+
+/**
+ * eat_item 工具实现。
+ *
+ * 流程：校验 → 选食物（指定 or 自动挑饱食度最高的）→ 逐个 equip + consume
+ *      → 用背包差值 + bot.food 汇报真实结果（绝不谎报“我吃了”）。
+ *
+ * @param {object} bot
+ * @param {{item_name?: string, count?: number|string}} args
+ * @returns {Promise<string>}
+ */
+async function eatItem(bot, args = {}) {
+  const wanted = String(args.item_name || '').trim()
+  const rawCount = args.count === undefined ? 1 : Number(args.count)
+
+  try {
+    // ---------------- 1. 参数与前置校验 ----------------
+    if (!bot.entity) return '进食失败：机器人还没有出生（spawn），无法执行动作'
+    if (!bot.inventory) return '进食失败：背包数据还没同步，请稍后再试'
+    if (!Number.isFinite(rawCount) || rawCount <= 0) {
+      return '进食失败：count 必须是大于 0 的整数（默认 1）'
+    }
+
+    const food = typeof bot.food === 'number' ? Math.round(bot.food) : null
+    if (food !== null && food >= 20) {
+      return `进食失败：饥饿值已经是 ${food}/20，现在吃会浪费食物；等掉到 20 以下再吃`
+    }
+
+    const table = getFoodTable(bot)
+    const carried = listCarriedFoods(bot)
+    if (carried.length === 0) {
+      return (
+        '进食失败：背包里没有任何食物。可以先 attack_entity 打牛(cow)/猪(pig) 拿生肉，' +
+        '或去采甜浆果(sweet_berries)/苹果(apple)'
+      )
+    }
+
+    // ---------------- 2. 决定吃哪一种 ----------------
+    let item = null
+
+    if (wanted) {
+      item = carried.find((it) => it.name === wanted) || null
+      if (!item) {
+        if (!table[wanted]) {
+          return `进食失败："${wanted}" 不是食物，请传入食物英文 ID（例如 bread、cooked_beef、apple）`
+        }
+        const bag = carried
+          .slice(0, 10)
+          .map((it) => `${labelName(it.name)} x${it.count}`)
+          .join('、')
+        return `进食失败：背包里没有 ${labelName(wanted)}。现有食物：${bag}`
+      }
+      if (TOXIC_FOODS.has(wanted)) {
+        log('WARN', `[tools] eat_item：按指令食用有毒食物 ${wanted}（饥饿值 ${food}）`)
+      }
+    } else {
+      // 自动挑选：优先跳过有毒食物；只有“没别的吃的且快饿死了”才吃它们
+      const safe = carried.filter((it) => !TOXIC_FOODS.has(it.name))
+      if (safe.length === 0 && food !== null && food > 6) {
+        return (
+          '进食失败：背包里只有河豚(pufferfish)/腐肉(rotten_flesh) 这类有毒食物，现在还不值得吃。' +
+          '建议先去找正常食物，或先忍一忍'
+        )
+      }
+      const pool = safe.length > 0 ? safe : carried
+
+      // 饱食度收益 = effectiveQuality（食物点数 + 饱和度加成），同分时优先数量多的
+      item = [...pool].sort((a, b) => {
+        const qa = (table[a.name] && table[a.name].effectiveQuality) || 0
+        const qb = (table[b.name] && table[b.name].effectiveQuality) || 0
+        if (qb !== qa) return qb - qa
+        return b.count - a.count
+      })[0]
+    }
+
+    // ---------------- 3. 逐个进食 ----------------
+    const need = Math.min(Math.floor(rawCount), MAX_EAT_COUNT, item.count)
+    const startFood = food
+    const startHealth = typeof bot.health === 'number' ? Math.round(bot.health) : null
+    const beforeCount = countItem(bot, item.name)
+
+    for (let i = 0; i < need; i++) {
+      if (typeof bot.food === 'number' && bot.food >= 20) break
+
+      // 每轮重取堆叠：吃完一组后物品对象会失效，复用会 equip 到空气
+      const stack = bot.inventory.items().find((it) => it.name === item.name)
+      if (!stack) break
+
+      try {
+        // equip 同样要带超时：物品格失效/界面未关时它会一直挂着
+        await withTimeout(bot.equip(stack, 'hand'), EQUIP_TIMEOUT, '装备食物')
+        await withTimeout(bot.consume(), EAT_TIMEOUT, '进食')
+      } catch (err) {
+        log('WARN', `[tools] 吃 ${item.name} 失败：${describeError(err)}`)
+        break
+      }
+      await sleep(EAT_SETTLE)
+    }
+
+    // ---------------- 4. 用真实数据汇报 ----------------
+    const eaten = Math.max(0, beforeCount - countItem(bot, item.name))
+    const nowFood = typeof bot.food === 'number' ? Math.round(bot.food) : null
+    const nowHealth = typeof bot.health === 'number' ? Math.round(bot.health) : null
+    const left = countItem(bot, item.name)
+
+    if (eaten === 0) {
+      return (
+        `进食失败：没能吃下 ${labelName(item.name)}（可能动作被中断，或该物品当前不可食用）。` +
+        '请先 get_status 复查饥饿值，然后再决定'
+      )
+    }
+
+    log('TOOL', `[tools] eat_item：吃掉 ${eaten} 个 ${item.name}，饥饿值 ${startFood} → ${nowFood}`)
+
+    const parts = [
+      `已吃掉 ${eaten} 个 ${labelName(item.name)}` +
+        (startFood !== null && nowFood !== null ? `，饥饿值 ${startFood}/20 → ${nowFood}/20` : ''),
+      nowHealth !== null ? `血量 ${nowHealth}/20` : '',
+      `背包还剩 ${left} 个`
+    ].filter(Boolean)
+
+    if (nowFood !== null && nowFood < 20) parts.push('还没吃饱，必要时可以再吃一次')
+    if (nowHealth !== null && nowHealth <= 10) parts.push('血量仍然偏低，先别回去硬拼')
+
+    return parts.join('；')
+  } catch (err) {
+    log('ERROR', `[tools] eat_item 异常：${describeError(err)}`)
+    return `进食时发生异常：${describeError(err)}。请检查机器人状态后再试。`
+  }
+}
+
+// ------------------------------ smelt_item ------------------------------
+/**
+ * 熔炉冶炼（smelt_item）。
+ *
+ * minecraft-data 的 recipes.json 只有工作台配方，没有熔炉配方，
+ * 所以这里用内置的“产物 → 原料”表兜底；真正的判定交给服务器：
+ * 把原料塞进熔炉输入格、燃料塞进燃料格，等烧完把产物取出来。
+ *
+ * 关键实现点：
+ *   · 数量取「想要 / 原料够 / 燃料够 / 上限」四者最小值，绝不空烧；
+ *   · 没有熔炉时会尝试把背包里的 furnace 放下来（复用工作台的空位探测）；
+ *   · 燃料优先煤炭/木炭（8 个/块），其次木板原木（1.5 个/块）；
+ *   · 用背包差值统计真实产出，超时/缺燃料都如实汇报。
+ */
+const SMELT_INPUTS = {
+  iron_ingot: ['raw_iron', 'iron_ore', 'deepslate_iron_ore'],
+  gold_ingot: ['raw_gold', 'gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
+  copper_ingot: ['raw_copper', 'copper_ore', 'deepslate_copper_ore'],
+  netherite_scrap: ['ancient_debris'],
+  glass: ['sand', 'red_sand'],
+  stone: ['cobblestone'],
+  smooth_stone: ['stone'],
+  brick: ['clay_ball'],
+  nether_brick: ['netherrack'],
+  green_dye: ['cactus'],
+  charcoal: ['oak_log', 'spruce_log', 'birch_log', 'jungle_log', 'acacia_log', 'dark_oak_log'],
+  cooked_beef: ['beef'],
+  cooked_porkchop: ['porkchop'],
+  cooked_chicken: ['chicken'],
+  cooked_mutton: ['mutton'],
+  cooked_rabbit: ['rabbit'],
+  cooked_cod: ['cod'],
+  cooked_salmon: ['salmon'],
+  baked_potato: ['potato'],
+  dried_kelp: ['kelp'],
+  popped_chorus_fruit: ['chorus_fruit']
+}
+
+const FURNACE_BLOCK_NAMES = ['furnace', 'lit_furnace']
+const FURNACE_SEARCH_RADIUS = 32
+const FURNACE_OPEN_TIMEOUT = 10000
+const SMELT_MAX_COUNT = 32
+const SMELT_POLL = 500
+const SMELT_PER_ITEM_MS = 11000 // 原版烧一个约 10 秒，留 1 秒余量
+const SMELT_MIN_WAIT = 15000
+const SMELT_MAX_WAIT = 150000
+
+/** 一个燃料能烧几个物品（原版近似值，用于估算需要几块燃料） */
+function fuelUnits(name) {
+  if (name === 'coal' || name === 'charcoal') return 8
+  if (name === 'coal_block') return 80
+  if (name === 'blaze_rod') return 12
+  if (name === 'lava_bucket') return 100
+  if (name === 'dried_kelp_block') return 20
+  if (name === 'bamboo') return 0.25
+  // ^log$ / ^planks$ 是 1.12.2 的旧命名（没有 oak_ 前缀），必须一起算作燃料
+  if (/^(log|planks)$|_planks$|_log$|_wood$|_fence$|crafting_table|bookshelf|chest$/.test(name)) return 1.5
+  if (name === 'stick' || /_sapling$/.test(name)) return 0.5
+  return 0
+}
+
+/** 背包里所有可用燃料，按“单块耐烧程度”从高到低排序 */
+function listCarriedFuels(bot) {
+  if (!bot.inventory) return []
+  return bot.inventory
+    .items()
+    .map((item) => ({ item, units: fuelUnits(item.name) }))
+    .filter((entry) => entry.units > 0)
+    .sort((a, b) => b.units - a.units)
+}
+
+/** 该产物可以用哪些原料烧（charcoal 额外允许任意原木/木头） */
+function resolveSmeltInputs(bot, outputName) {
+  const list = SMELT_INPUTS[outputName]
+  if (!Array.isArray(list)) return []
+
+  // 关键：按**当前连接版本**的 registry 过滤。
+  // 1.12.2 没有 raw_iron / ancient_debris，1.16.5 没有 raw_gold，
+  // 不过滤就会在报错话术里让模型去找根本不存在的原料。
+  const exists = (name) => Boolean(bot && bot.registry && bot.registry.itemsByName && bot.registry.itemsByName[name])
+  const available = list.filter(exists)
+
+  if (outputName !== 'charcoal' || !bot.inventory) return available
+
+  // 木炭：任意原木都能烧，但 1.12.2 只有 log 没有 oak_log，所以按名字模式动态收集
+  const logs = bot.inventory
+    .items()
+    .map((item) => item.name)
+    .filter((name) => /_(log|wood)$|^log$/.test(name))
+  return [...new Set([...logs, ...available])]
+}
+
+/** 找附近的熔炉（含正在燃烧的 lit_furnace） */
+function findNearbyFurnace(bot) {
+  const ids = FURNACE_BLOCK_NAMES.map((name) => bot.registry.blocksByName[name]?.id).filter(
+    (id) => id !== undefined
+  )
+  if (ids.length === 0) return null
+  return bot.findBlock({ matching: ids, maxDistance: FURNACE_SEARCH_RADIUS }) || null
+}
+
+/** 把背包里的熔炉放到地上（复用工作台的空位探测逻辑，两者都是 1 格高） */
+async function placeFurnace(bot, furnaceItem) {
+  const spot = findPlaceSpot(bot)
+  if (!spot) return null
+
+  try {
+    await withTimeout(bot.equip(furnaceItem, 'hand'), EQUIP_TIMEOUT, '装备熔炉')
+    await withTimeout(bot.placeBlock(spot.reference, spot.face), 5000, '放置熔炉')
+    await sleep(300)
+
+    const placed = bot.blockAt(spot.pos)
+    if (placed && FURNACE_BLOCK_NAMES.includes(placed.name)) {
+      log('TOOL', `[tools] 已在 ${formatPos(spot.pos)} 放置熔炉`)
+      return placed
+    }
+  } catch (err) {
+    log('WARN', `[tools] 放置熔炉失败：${describeError(err)}`)
+  }
+  return null
+}
+
+/**
+ * 往窗口的某个槽位填物品（输入格 / 燃料格）。
+ * 一格里放不下时会自动再取下一组，最多 4 次，防止堆叠拆分卡死。
+ *
+ * @returns {Promise<number>} 实际放入的数量
+ */
+async function fillFurnaceSlot(bot, putFn, itemName, want) {
+  let filled = 0
+
+  for (let round = 0; round < 4 && filled < want; round++) {
+    const stack = bot.inventory.items().find((item) => item.name === itemName)
+    if (!stack) break
+
+    const take = Math.min(stack.count, want - filled)
+    try {
+      await withTimeout(putFn(stack.type, take), 8000, `放入 ${itemName}`)
+    } catch (err) {
+      log('WARN', `[tools] 放入 ${itemName} x${take} 失败：${describeError(err)}`)
+      break
+    }
+    filled += take
+  }
+
+  return filled
+}
+
+/**
+ * smelt_item 工具实现。
+ *
+ * @param {object} bot
+ * @param {{item_name?: string, count?: number|string}} args  item_name = 要烧出的产物
+ * @returns {Promise<string>}
+ */
+async function smeltItem(bot, args = {}) {
+  const rawName = String(args.item_name || '').trim()
+  const rawCount = args.count === undefined ? 1 : Number(args.count)
+
+  let furnace = null
+  let stalled = ''
+
+  try {
+    // ---------------- 1. 参数与前置校验 ----------------
+    if (!rawName) return '熔炼失败：缺少参数 item_name（填要烧出的产物，例如 iron_ingot）'
+    if (!bot.entity) return '熔炼失败：机器人还没有出生（spawn）'
+    if (!bot.pathfinder) return '熔炼失败：未加载 mineflayer-pathfinder 插件，无法寻路'
+    if (!Number.isFinite(rawCount) || rawCount <= 0) {
+      return '熔炼失败：count 必须是大于 0 的整数（默认 1）'
+    }
+    if (typeof bot.openFurnace !== 'function') {
+      return '熔炼失败：当前 mineflayer 实例没有熔炉插件，无法打开熔炉'
+    }
+    if (!bot.registry.itemsByName[rawName]) {
+      return `熔炼失败：物品 ID "${rawName}" 不存在，请传入英文 ID（例如 iron_ingot、glass、charcoal）`
+    }
+
+    // ---------------- 2. 原料 ----------------
+    const candidates = resolveSmeltInputs(bot, rawName)
+    if (candidates.length === 0) {
+      return (
+        `熔炼失败：不知道 ${labelName(rawName)} 该用什么原料烧。` +
+        '目前支持：iron_ingot、gold_ingot、copper_ingot、netherite_scrap、glass、stone、' +
+        'smooth_stone、charcoal、brick、nether_brick、green_dye 以及常见熟食'
+      )
+    }
+
+    const carriedInputs = candidates.flatMap((name) => {
+      const stack = bot.inventory.items().find((item) => item.name === name)
+      return stack ? [{ item: stack, count: countItem(bot, name) }] : []
+    })
+
+    if (carriedInputs.length === 0) {
+      return (
+        `熔炼失败：背包里没有可烧的原料（需要 ${candidates.map((n) => labelName(n)).join(' 或 ')}）。` +
+        `想烧出 ${labelName(rawName)}，先去 collect_resource 挖对应矿石`
+      )
+    }
+    const input = carriedInputs[0]
+
+    // ---------------- 3. 燃料 ----------------
+    const fuels = listCarriedFuels(bot)
+    if (fuels.length === 0) {
+      return (
+        '熔炼失败：背包里没有任何燃料。煤炭(coal)/木炭(charcoal) 最划算；' +
+        '没有的话木板(oak_planks)、原木(oak_log) 也能应急'
+      )
+    }
+    const fuel = fuels[0]
+
+    // ---------------- 4. 目标数量：想要 / 原料 / 燃料 / 上限 ----------------
+    let need = Math.min(Math.floor(rawCount), SMELT_MAX_COUNT, input.count)
+    const fuelSupports = Math.floor(fuel.units * fuel.item.count)
+    if (fuelSupports < need) need = fuelSupports
+    if (need <= 0) {
+      return `熔炼失败：燃料不够烧出哪怕 1 个 ${labelName(rawName)}，请先补充燃料`
+    }
+    const fuelCount = Math.max(1, Math.ceil(need / fuel.units))
+
+    // ---------------- 5. 找熔炉 / 放熔炉 ----------------
+    await ensureChunksLoaded(bot)
+
+    let block = findNearbyFurnace(bot)
+    if (!block) {
+      const furnaceItem = bot.inventory.items().find((item) => item.name === 'furnace')
+      if (furnaceItem) block = await placeFurnace(bot, furnaceItem)
+    }
+    if (!block) {
+      return (
+        `熔炼失败：周围 ${FURNACE_SEARCH_RADIUS} 格内找不到熔炉，背包里也没有 furnace。` +
+        '请先 craft_item 合成 furnace（需要 8 个圆石），本工具会帮你放下'
+      )
+    }
+
+    if (block.position.distanceTo(bot.entity.position) > 3) {
+      try {
+        await gotoOrThrow(
+          bot,
+          new GoalNear(block.position.x, block.position.y, block.position.z, 2),
+          GOTO_TIMEOUT,
+          '走向熔炉'
+        )
+      } catch (err) {
+        log('WARN', `[tools] 走向熔炉失败：${describeError(err)}，尝试原地交互`)
+      }
+    }
+
+    // ---------------- 6. 打开熔炉并投料 ----------------
+    if (bot.currentWindow) {
+      try {
+        await bot.closeWindow(bot.currentWindow)
+        await sleep(150)
+      } catch (err) {
+        log('WARN', `[tools] 关闭已有界面失败：${describeError(err)}`)
+      }
+    }
+
+    furnace = await withTimeout(bot.openFurnace(block), FURNACE_OPEN_TIMEOUT, '打开熔炉')
+
+    const beforeOutput = countItem(bot, rawName)
+
+    const putIn = await fillFurnaceSlot(
+      bot,
+      (type, count) => furnace.putInput(type, null, count),
+      input.item.name,
+      need
+    )
+    if (putIn === 0) {
+      return `熔炼失败：原料 ${labelName(input.item.name)} 没能放进熔炉输入格，请检查熔炉是否可用`
+    }
+
+    const putFuel = await fillFurnaceSlot(
+      bot,
+      (type, count) => furnace.putFuel(type, null, count),
+      fuel.item.name,
+      Math.min(fuelCount, fuel.item.count)
+    )
+    if (putFuel === 0) {
+      return `熔炼失败：燃料 ${labelName(fuel.item.name)} 没能放进燃料格，请检查熔炉是否可用`
+    }
+
+    log(
+      'TOOL',
+      `[tools] smelt_item 开始：${input.item.name} x${putIn} + ${fuel.item.name} x${putFuel} → ${rawName}`
+    )
+
+    // ---------------- 7. 等待烧炼（产出即取） ----------------
+    const startedAt = Date.now()
+    const deadline = startedAt + Math.min(SMELT_MAX_WAIT, Math.max(SMELT_MIN_WAIT, need * SMELT_PER_ITEM_MS + 8000))
+
+    while (Date.now() < deadline) {
+      if (furnace.outputItem()) {
+        try {
+          await withTimeout(furnace.takeOutput(), 6000, '取出产物')
+        } catch (err) {
+          log('WARN', `[tools] 取出产物失败：${describeError(err)}`)
+          break
+        }
+        continue
+      }
+
+      const inputLeft = furnace.inputItem()
+      if (!inputLeft) break // 原料烧完，产物也取干净了
+
+      const burning = typeof furnace.fuelSeconds === 'number' && furnace.fuelSeconds > 0
+      if (!furnace.fuelItem() && !burning && Date.now() - startedAt > 3000) {
+        stalled = '燃料烧完了，但原料还没烧完'
+        break
+      }
+
+      await sleep(SMELT_POLL)
+    }
+
+    // ---------------- 8. 用背包差值汇报真实产出 ----------------
+    const produced = Math.max(0, countItem(bot, rawName) - beforeOutput)
+    const inputLeft = countItem(bot, input.item.name)
+    const fuelLeft = countItem(bot, fuel.item.name)
+
+    log('TOOL', `[tools] smelt_item 结束：产出 ${produced} 个 ${rawName}`)
+
+    if (produced === 0) {
+      return (
+        `熔炼失败：一个 ${labelName(rawName)} 都没烧出来` +
+        (stalled ? `（${stalled}）` : '（可能超时或熔炉被破坏）') +
+        `。背包里还剩原料 ${inputLeft} 个、燃料 ${fuelLeft} 个，请 get_status 复查后再试`
+      )
+    }
+
+    const tips = []
+    if (produced < need) tips.push(`目标是 ${need} 个，还差 ${need - produced} 个${stalled ? `（${stalled}）` : ''}`)
+    if (inputLeft > 0) tips.push(`背包里还剩原料 ${inputLeft} 个`)
+    if (fuelLeft > 0) tips.push(`还剩燃料 ${fuelLeft} 个`)
+
+    return (
+      `熔炼完成：已烧出 ${produced} 个 ${labelName(rawName)}，` +
+      `背包里现在共有 ${countItem(bot, rawName)} 个` +
+      (tips.length ? `；${tips.join('；')}` : '') +
+      (produced < need ? '。可以再调用一次 smelt_item 补齐' : '')
+    )
+  } catch (err) {
+    log('ERROR', `[tools] smelt_item 异常：${describeError(err)}`)
+    return `熔炼 ${rawName || '物品'} 时发生异常：${describeError(err)}。请 get_status 检查机器人与熔炉状态`
+  } finally {
+    if (furnace) {
+      try {
+        furnace.close()
+      } catch (_) {
+        /* 关不掉也不影响结果 */
+      }
+    }
+  }
+}
+
 // ------------------------------ interact_with_block ------------------------------
 /**
  * 万物交互：种地、开箱、用桶、剪羊毛都靠它。
@@ -1860,10 +2533,9 @@ async function interactWithBlock(bot, args = {}) {
     // 走到方块旁边（已经在 4 格内就不折腾；交互距离上限约 5 格）
     if (block.position.distanceTo(bot.entity.position) > 4) {
       try {
-        await withTimeout(
-          bot.pathfinder.goto(
-            new GoalNear(block.position.x, block.position.y, block.position.z, 2)
-          ),
+        await gotoOrThrow(
+          bot,
+          new GoalNear(block.position.x, block.position.y, block.position.z, 2),
           GOTO_TIMEOUT,
           '走向目标方块'
         )
@@ -1992,6 +2664,50 @@ function detectDangerNearby(bot, radius = DANGER_RADIUS) {
 }
 
 /**
+ * 安全刹车：pathfinder 未加载 / 已停止 / 内部抛错都不影响主流程。
+ * 单独抽出来是因为“刹车”会出现在三个地方：超时兜底、安全巡检、上层中断。
+ */
+function stopPathfinder(bot, label = '') {
+  if (!bot || !bot.pathfinder || typeof bot.pathfinder.stop !== 'function') return
+  try {
+    bot.pathfinder.stop()
+  } catch (err) {
+    log('WARN', `[tools] 停止寻路失败${label ? `（${label}）` : ''}：${describeError(err)}`)
+  }
+}
+
+/**
+ * 带超时、且**保证刹车**的寻路。
+ *
+ * 为什么不能直接写 `withTimeout(bot.pathfinder.goto(goal), ...)`：
+ *   withTimeout 只能让“调用方”停止等待，pathfinder 内部的寻路任务并不会停。
+ *   超时后紧接着执行 bot.dig / bot.craft / bot.openFurnace 时，两个动作会抢
+ *   bot 的控制权，表现为：挖到一半被拖走、材料够了却因距离不足合成失败、
+ *   一边走一边右键导致熔炉打不开。
+ *   所以只要这一次寻路没能成功返回（超时 / No path / 被取消），
+ *   都必须先 stop() 再抛，把“后台还在走”的可能性彻底消掉。
+ *
+ * @param {object} bot
+ * @param {object} goal      pathfinder 的 Goal 实例（GoalBlock / GoalNear …）
+ * @param {number} timeoutMs 超时毫秒
+ * @param {string} label     超时文案里的动作名，方便定位是谁卡住了
+ * @returns {Promise<void>} 走到了才 resolve；任何失败都会先刹车再抛出
+ */
+async function gotoOrThrow(bot, goal, timeoutMs, label) {
+  if (!bot || !bot.pathfinder) {
+    throw new Error('未加载 mineflayer-pathfinder 插件，无法寻路')
+  }
+
+  try {
+    await withTimeout(bot.pathfinder.goto(goal), timeoutMs, label)
+  } catch (err) {
+    // 关键一行：超时只是“我们不等了”，寻路任务还在后台跑，必须主动掐掉
+    stopPathfinder(bot, label)
+    throw err
+  }
+}
+
+/**
  * 带安全护栏的寻路：走的过程中巡检危险方块与掉血，命中就主动 stop()。
  *
  * 返回一个“永不抛错”的结果对象，让上层能区分三种失败：
@@ -2032,22 +2748,130 @@ async function gotoWithGuard(bot, goal, timeoutMs, label) {
     if (!aborted) return
 
     // 立刻刹车：pathfinder.stop() 会让 goto 的 Promise 以 reject 结束，下面统一归一化
-    try {
-      bot.pathfinder.stop()
-    } catch (err) {
-      log('WARN', `[tools] 停止寻路失败：${describeError(err)}`)
-    }
+    stopPathfinder(bot, '安全巡检中断')
     log('WARN', `[tools] 移动中断：${aborted}`)
   }, MOVE_TICK)
 
   try {
-    await withTimeout(bot.pathfinder.goto(goal), timeoutMs, label)
+    // 用 gotoOrThrow：超时 / No path 都会先刹车再抛，绝不留后台寻路
+    await gotoOrThrow(bot, goal, timeoutMs, label)
     return { ok: !aborted, aborted, error: '' }
   } catch (err) {
     // 主动刹车导致的 reject 不算“走不过去”，别把两种结果混在一起
     return { ok: false, aborted, error: aborted ? '' : describeError(err) }
   } finally {
     clearInterval(watchdog)
+  }
+}
+
+// ------------------------------ 空间记忆（地标） ------------------------------
+/**
+ * save_waypoint：把坐标写进 waypoints.json。
+ *
+ * 默认取机器人当前位置 —— “记住这里”是最常见的用法，不该逼模型先调 get_status 抄坐标。
+ */
+async function saveWaypoint(bot, args = {}) {
+  const name = waypoints.normalizeName(args.name)
+
+  try {
+    if (!name) return '保存地标失败：缺少 name，例如 家、村庄、铁矿洞'
+    if (!bot || !bot.entity) return '保存地标失败：机器人还没有出生（spawn），拿不到当前坐标'
+
+    const pos = bot.entity.position
+    const pick = (axis) => (args[axis] === undefined || args[axis] === null ? pos[axis] : Number(args[axis]))
+    const x = pick('x')
+    const y = pick('y')
+    const z = pick('z')
+
+    if (![x, y, z].every((value) => Number.isFinite(value))) {
+      return '保存地标失败：x / y / z 必须是数字（可以全部省略，默认用当前位置）'
+    }
+
+    const dimension = bot.game && bot.game.dimension ? bot.game.dimension : 'unknown'
+    const result = waypoints.saveWaypoint({ name, x, y, z, dimension })
+    if (!result.ok) return `保存地标失败：${result.error}`
+
+    const wp = result.waypoint
+    const total = waypoints.listWaypoints().length
+    log('TOOL', `[tools] save_waypoint：${wp.name} @ ${formatPos(wp)}（${wp.dimension}）`)
+
+    const evicted = result.evicted
+      ? `（地标超过 ${waypoints.MAX_WAYPOINTS} 个，已淘汰最久没用过的「${result.evicted}」）`
+      : ''
+
+    return (
+      `${result.updated ? '已更新' : '已记住'}地标「${wp.name}」：${formatPos(wp)}，维度 ${wp.dimension}。` +
+      `以后说“去${wp.name}”我会用 go_to_waypoint 过去；当前共记录 ${total} 个地标。${evicted}`
+    )
+  } catch (err) {
+    log('ERROR', `[tools] save_waypoint 异常：${describeError(err)}`)
+    return `保存地标时发生异常：${describeError(err)}`
+  }
+}
+
+/**
+ * go_to_waypoint：读出地标坐标，复用 gotoWithGuard（掉血/岩浆会中断）。
+ *
+ * 刻意不支持跨维度：pathfinder 只能在同一维度内寻路，
+ * 与其让模型以为“走不到”，不如明确告诉它先过传送门。
+ */
+async function goToWaypoint(bot, args = {}) {
+  const name = waypoints.normalizeName(args.name)
+
+  try {
+    if (!name) return '前往地标失败：缺少 name，例如 家、村庄'
+    if (!bot || !bot.entity) return '前往地标失败：机器人还没有出生（spawn）'
+    if (!bot.pathfinder) return '前往地标失败：未加载 mineflayer-pathfinder 插件，无法寻路'
+
+    const wp = waypoints.getWaypoint(name)
+    if (!wp) {
+      const names = waypoints.listWaypoints().map((item) => item.name).slice(0, 10)
+      return names.length
+        ? `没有找到地标「${name}」。已记录的地标：${names.join('、')}`
+        : `没有找到地标「${name}」，目前也没有保存过任何地标。可以用 save_waypoint 先记一个。`
+    }
+
+    const here = bot.game && bot.game.dimension ? bot.game.dimension : 'unknown'
+    if (wp.dimension && wp.dimension !== 'unknown' && here !== 'unknown' && wp.dimension !== here) {
+      return (
+        `地标「${wp.name}」在 ${wp.dimension}，而你现在在 ${here}：跨维度没法直接寻路。` +
+        '请先通过传送门换维度，到了之后再让我 go_to_waypoint。'
+      )
+    }
+
+    const from = bot.entity.position.clone()
+    const distance = from.distanceTo(new Vec3(wp.x, wp.y, wp.z))
+    // 长距离留足时间：每格按 1.8 秒估算（和 explore 保持同一套口径）
+    const timeout = Math.min(MOVE_MAX_TIMEOUT, Math.max(MOVE_DEFAULT_TIMEOUT, Math.round(distance * 1800)))
+
+    log('TOOL', `[tools] go_to_waypoint：${wp.name} ${formatPos(wp)}，直线距离 ${distance.toFixed(0)} 格`)
+
+    const result = await gotoWithGuard(
+      bot,
+      new GoalNear(wp.x, wp.y, wp.z, 2),
+      timeout,
+      `前往地标 ${wp.name}`
+    )
+
+    const now = bot.entity.position.clone()
+    const moved = now.distanceTo(from)
+
+    if (result.aborted) {
+      return (
+        `前往「${wp.name}」被中断：${result.aborted}。` +
+        `已走约 ${moved.toFixed(0)} 格，当前坐标 ${formatPos(now)}，建议先处理危险再重新出发。`
+      )
+    }
+    if (result.ok) {
+      return `已到达地标「${wp.name}」附近，当前坐标 ${formatPos(now)}（目标 ${formatPos(wp)}）。`
+    }
+    return (
+      `前往「${wp.name}」失败：${result.error || '未知原因'}。` +
+      `已移动约 ${moved.toFixed(0)} 格，当前 ${formatPos(now)}。`
+    )
+  } catch (err) {
+    log('ERROR', `[tools] go_to_waypoint 异常：${describeError(err)}`)
+    return `前往地标时发生异常：${describeError(err)}`
   }
 }
 
@@ -2454,10 +3278,29 @@ const STRUCTURE_ENTITY_PATTERN = /^(villager|wandering_trader|iron_golem|cat)$/
  *   3) 找最近岸边（沙/砾石/草方块/土/石）寻路过去。
  *
  * 返回：人类可读的处理过程 + 处理后的生存状态（模型据此决定要不要再逃一次）。
+ *
+ * —— 为什么外面还要包一层「保护旗标」——
+ *   危急巡检是 500ms 定时器驱动的（connection.js 的 criticalPulse → server.js 的
+ *   onCritical → interruptBotActions），它可以在任意时刻清掉按键状态。
+ *   而逃生第 ① 步靠 setControlState('jump') 持续上浮 —— 一旦被 clearControlStates()
+ *   清掉，机器人就停在水里干等，循环空转到 6 秒超时才放弃，表现为“越危险越动不了”。
+ *   所以逃生期间只允许中断大模型循环（controller.abort），不允许动底层动作；
+ *   逃生自然结束（或异常退出）后立刻复位，保证后续的打断逻辑完全不变。
  */
 async function escapeDanger(bot) {
   if (!bot || !bot.entity) return '机器人还没有出生（spawn），无法执行逃生。'
 
+  bot.isEscaping = true
+  try {
+    return await runEscapeSteps(bot)
+  } finally {
+    // 无论正常结束还是抛错，都必须复位：否则机器人会永久失去“被强制停手”的能力
+    bot.isEscaping = false
+  }
+}
+
+/** 逃生的实际流程（旗标的置位/复位由 escapeDanger 负责，这里只管动作） */
+async function runEscapeSteps(bot) {
   const before = readSurvivalState(bot)
   const steps = []
 
@@ -2654,6 +3497,9 @@ async function dispatchTool(bot, toolName, safeArgs) {
     case 'craft_item':
       return await craftItem(bot, safeArgs)
 
+    case 'smelt_item':
+      return await smeltItem(bot, safeArgs)
+
     // ---- 战斗与感知 ----
     case 'attack_entity':
       return await attackEntity(bot, safeArgs)
@@ -2668,9 +3514,12 @@ async function dispatchTool(bot, toolName, safeArgs) {
     case 'equip_item':
       return await equipItemTool(bot, safeArgs)
 
-    // ---- 背包管理 ----
+    // ---- 背包与生存 ----
     case 'drop_item':
       return await dropItem(bot, safeArgs)
+
+    case 'eat_item':
+      return await eatItem(bot, safeArgs)
 
     // ---- 移动与探索 ----
     case 'move_to':
@@ -2679,29 +3528,37 @@ async function dispatchTool(bot, toolName, safeArgs) {
     case 'explore':
       return await explore(bot, safeArgs)
 
+    // ---- 空间记忆（地标） ----
+    case 'save_waypoint':
+      return await saveWaypoint(bot, safeArgs)
+
+    case 'go_to_waypoint':
+      return await goToWaypoint(bot, safeArgs)
+
     case 'scan_environment':
       return await scanEnvironment(bot, safeArgs)
 
     // ---- 状态 ----
     case 'get_status':
-      return getStatus(bot)
+      return await getStatus(bot)
 
     // ---- 游戏知识（返回严格 Markdown，禁止二次汉化） ----
     case 'query_game_knowledge':
-      return queryGameKnowledge(bot, safeArgs)
+      return await queryGameKnowledge(bot, safeArgs)
 
     // ---- 生存与侦察 ----
     case 'escape_danger':
-      return escapeDanger(bot)
+      return await escapeDanger(bot)
 
     case 'locate_structure':
-      return locateStructure(bot, safeArgs)
+      return await locateStructure(bot, safeArgs)
 
     default:
       return (
-        `未知工具 "${toolName}"。可用工具：collect_resource、craft_item、` +
-        `attack_entity、find_entities、interact_with_block、equip_item、drop_item、` +
-        `move_to、explore、scan_environment、get_status、query_game_knowledge、escape_danger、locate_structure`
+        `未知工具 "${toolName}"。可用工具：collect_resource、craft_item、smelt_item、` +
+        `attack_entity、find_entities、interact_with_block、equip_item、drop_item、eat_item、` +
+        `move_to、explore、save_waypoint、go_to_waypoint、scan_environment、get_status、` +
+        `query_game_knowledge、escape_danger、locate_structure`
       )
   }
 }
@@ -2748,6 +3605,8 @@ module.exports = {
   // 便于单独测试 / 二次封装
   collectResource,
   craftItem,
+  smeltItem,
+  eatItem,
   attackEntity,
   findEntities,
   interactWithBlock,
@@ -2755,6 +3614,9 @@ module.exports = {
   dropItem,
   moveTo,
   explore,
+  saveWaypoint,
+  goToWaypoint,
+  resolveSmeltSource, // 版本隔离诊断用
   scanEnvironment,
   escapeDanger, // 逃生（单测/诊断可直接调）
   locateStructure,

@@ -26,7 +26,9 @@ const { pathfinder } = require('mineflayer-pathfinder')
 
 // 复用工具层的寻路初始化（Movements 配置只维护一份）
 const { setupMovements } = require('../agent/tools')
-const { log } = require('../agent/utils')
+const { readSurvivalState } = require('../agent/survival')
+const { verifyGameData } = require('../agent/knowledge')
+const { log, describeError } = require('../agent/utils')
 // AI 视角（prismarine-viewer）：独立端口 + 失败只 WARN，绝不影响 Agent 主循环
 const { initViewer } = require('./viewer')
 
@@ -58,15 +60,150 @@ function onDeath(callback) {
   return () => deathListeners.delete(callback)
 }
 
+// ------------------------------ 版本自检（Sanity Check） ------------------------------
+/**
+ * 最近一次版本自检结果。
+ * server.js 的 /api/health 会把它带给前端；前端据此提示“合成表可能无法显示”。
+ * 放在连接层而不是每次查询时现算：spawn 后版本就固定了，没必要每步都验。
+ */
+let lastVersionCheck = null
+
+/** 供 /api/health 与测试读取（未 spawn 时返回 null） */
+function getVersionCheck() {
+  return lastVersionCheck
+}
+
+/**
+ * 校验 minecraft-data 是否真的适配 bot.version。
+ * 失败不阻断运行（知识查询会降级），但必须让玩家看见 —— 否则模型只会以为“世上没有铁矿石”。
+ */
+function runVersionCheck(bot) {
+  try {
+    const check = verifyGameData(bot)
+    lastVersionCheck = check
+
+    if (check.ok) {
+      log('MC', `版本自检通过：v${check.version}，配方 ${check.recipeCount} 条`)
+    } else {
+      log(
+        'WARN',
+        `版本自检失败（v${check.version}）：${check.reason}。` +
+          'minecraft-data 可能未适配该版本，知识查询会降级、部分合成表可能无法显示！'
+      )
+    }
+  } catch (err) {
+    lastVersionCheck = {
+      ok: false,
+      version: (bot && bot.version) || '未知',
+      missing: [],
+      recipeCount: 0,
+      reason: describeError(err),
+      checkedAt: Date.now()
+    }
+    log('WARN', `版本自检异常（忽略，Agent 继续运行）：${describeError(err)}`)
+  }
+}
+
+// ------------------------------ 危急事件（痛觉神经） ------------------------------
+/**
+ * 危急事件订阅者：server.js 用它把“我快死了”立刻变成“中断任务 + 推送警告”。
+ *
+ * 为什么要独立于 ReAct 循环：
+ *   循环只在两次模型请求之间检查状态，而一次工具调用（寻路 30 秒、挖矿 10 秒）
+ *   期间机器人是“聋的”。溺水、着火、被砍都是**秒级**事件，必须在底层直接感知。
+ */
+const criticalListeners = new Set()
+
+/**
+ * 订阅危急事件。
+ * @param {(info: {reason: string, source: string, state: object, at: number}) => void} callback
+ * @returns {() => void} 取消订阅函数（调用方用完必须注销，否则监听器会累积）
+ */
+function onCritical(callback) {
+  if (typeof callback !== 'function') return () => {}
+  criticalListeners.add(callback)
+  return () => criticalListeners.delete(callback)
+}
+
+/** 巡检周期：physicsTick 不是每个版本都有，用定时器最稳（500ms 足够快，也不吃 CPU） */
+const CRITICAL_PULSE_MS = Number(process.env.CRITICAL_PULSE_MS || 500)
+let criticalPulseTimer = null
+
+/**
+ * 上升沿判定：只在「安全 → 危急」这一刻广播一次。
+ * 如果按“每次巡检都广播”，溺水 10 秒就会推 20 条警告、abort 20 次；
+ * 危险持续期间由 ReAct 循环的状态行与硬指令继续施压，不靠重复广播。
+ */
+let lastCriticalReason = ''
+
+/** 广播给所有订阅者（单个订阅者抛错不能影响其它人） */
+function broadcastCritical(info) {
+  log('WARN', `[CRITICAL] 危急事件（${info.source}）：${info.reason}`)
+  for (const listener of criticalListeners) {
+    try {
+      listener(info)
+    } catch (err) {
+      log('ERROR', `危急事件回调执行异常：${err && err.message ? err.message : err}`)
+    }
+  }
+}
+
+/** 读一次真实状态并判断是否需要报警（health 事件 / 定时巡检都调它） */
+function checkCritical(source = 'pulse') {
+  if (!bot || !bot.entity) {
+    lastCriticalReason = '' // 没进游戏不算危险，避免上线瞬间误报
+    return
+  }
+
+  const state = readSurvivalState(bot)
+  if (!state.critical) {
+    lastCriticalReason = ''
+    return
+  }
+
+  if (state.reason === lastCriticalReason) return // 同一段危险，已经报过了
+
+  lastCriticalReason = state.reason
+  broadcastCritical({ reason: state.reason, source, state, at: Date.now() })
+}
+
+function startCriticalPulse() {
+  stopCriticalPulse()
+  criticalPulseTimer = setInterval(() => checkCritical('pulse'), CRITICAL_PULSE_MS)
+  // 别让心跳定时器把进程钉住（CLI 模式 / 测试里尤其明显）
+  if (typeof criticalPulseTimer.unref === 'function') criticalPulseTimer.unref()
+}
+
+function stopCriticalPulse() {
+  if (criticalPulseTimer) {
+    clearInterval(criticalPulseTimer)
+    criticalPulseTimer = null
+  }
+}
+
 /**
  * 立刻打断机器人当前动作（寻路 / 挖掘 / 按键）。
  *
  * 为什么必须有它：AbortController 只能让 Agent 循环在**下一次检查**时停下，
  * 而 pathfinder.goto() 可能要跑 30 秒 —— 用户点了“停止”却还要看机器人走完，
  * 体感就是“停不下来”。这里直接把底层动作掐掉。
+ *
+ * 【逃生豁免】
+ *   escape_danger 执行期间会挂 bot.isEscaping = true（见 tools.js）。
+ *   那时候机器人正在自救：上浮靠 setControlState('jump') 持续按住跳跃键，
+ *   挖头顶靠 bot.dig。此时若照常 stopDigging() / clearControlStates()，
+ *   等于把自救动作掐掉 —— 溺水/着火时“越危险越动不了”。
+ *   所以逃生期间这里直接返回，只让上层 abort 打断大模型循环；
+ *   逃生自然结束后旗标复位，强制中断能力立即恢复。
  */
 function interruptBotActions() {
   if (!bot) return
+
+  if (bot.isEscaping === true) {
+    log('WARN', '[CRITICAL] 机器人正在执行逃生动作，跳过强制停手（只中断模型循环）')
+    return
+  }
+
   try {
     if (bot.pathfinder && typeof bot.pathfinder.stop === 'function') bot.pathfinder.stop()
   } catch (_) {
@@ -107,6 +244,11 @@ function createBot() {
   // 插件必须在 createBot 之后立刻加载，否则 bot.pathfinder 为 undefined
   bot.loadPlugin(pathfinder)
 
+  // ---- 痛觉神经：血量变化立刻判一次 + 每 500ms 轮询溺水/着火 ----
+  // health 事件只在血量/饥饿变化时触发，着火与溺水属于“实体状态”，必须靠轮询。
+  bot.on('health', () => checkCritical('health'))
+  startCriticalPulse()
+
   bot.once('login', () => log('MC', '登录成功'))
 
   // 首次 spawn 后启动 AI 视角：viewer 内部自己 try/catch，这里再包一层纯属保险，
@@ -125,6 +267,9 @@ function createBot() {
     } catch (err) {
       log('ERROR', `初始化 Movements 失败：${err.message}`)
     }
+
+    // 版本自检：spawn 时 bot.version 已经由握手包确定，正好用来验证 minecraft-data
+    runVersionCheck(bot)
   })
 
   // 死亡：不只是打日志，还要广播给 Agent 循环（否则模型醒来还以为自己在原地干活）
@@ -145,6 +290,10 @@ function createBot() {
   bot.on('error', (err) => log('ERROR', `Minecraft 连接错误：${err.message}`))
   bot.on('end', (reason) => {
     log('ERROR', `与服务器断开连接（${reason}）`)
+    // 连接已断：巡检定时器必须停掉，否则会对着一个死实例空转
+    stopCriticalPulse()
+    lastCriticalReason = ''
+    lastVersionCheck = null // 下次连到哪个版本还不知道，旧的检查结果不能留着误导前端
     if (!manualQuit) scheduleReconnect() // 主动退出时不再重连
   })
 
@@ -172,28 +321,78 @@ function getBot() {
   return createBot()
 }
 
+/** 等待 spawn 期间，多久对齐一次“当前实例是谁”（毫秒） */
+const SPAWN_POLL_MS = 200
+
 /**
  * 等待机器人 spawn 完成。
- * @param {number} timeout 超时毫秒数
+ *
+ * 为什么不能只 `getBot().once('spawn', ...)`：
+ *   断线后 connection.js 会走 scheduleReconnect → createBot()，**把实例整个换掉**。
+ *   如果等待开始时拿的是旧实例的快照，那个实例永远不会再 spawn，
+ *   于是明明新连接已经进来了，调用方还要干等到 60s 超时（表现为“偶发 60 秒无响应”）。
+ *   所以这里持续对齐当前实例：实例一换，监听器就跟着搬过去；
+ *   同时用 isReady() 兜底，任何时刻只要机器人已经可用就立刻 resolve。
+ *
+ * @param {number} timeout 超时毫秒数（覆盖整个等待窗口，不因重连而重置）
+ * @returns {Promise<object>} 已就绪的 bot 实例
  */
 function waitForSpawn(timeout = 60000) {
   if (isReady()) return Promise.resolve(bot)
 
   return new Promise((resolve, reject) => {
-    const currentBot = getBot()
+    let attached = null // 当前挂监听的那个实例
+    let settled = false
+    let poll = null
+    let timer = null
 
-    const timer = setTimeout(() => {
-      currentBot.off('spawn', onSpawn)
-      reject(new Error(`等待机器人进入游戏超时（${timeout}ms），请检查服务器是否已启动`))
-    }, timeout)
-
-    function onSpawn() {
-      clearTimeout(timer)
-      currentBot.off('spawn', onSpawn)
-      resolve(currentBot)
+    /** 只解绑我们自己挂的那个监听，绝不动其它模块的监听器 */
+    const detach = () => {
+      if (!attached) return
+      attached.off('spawn', onSpawn)
+      attached = null
     }
 
-    currentBot.once('spawn', onSpawn)
+    const settle = (ok, value) => {
+      if (settled) return
+      settled = true
+      detach()
+      clearInterval(poll)
+      clearTimeout(timer)
+      if (ok) resolve(value)
+      else reject(value)
+    }
+
+    function onSpawn() {
+      // 旧实例理论上也可能残留 spawn 事件，一律以“当前实例是否真的可用”为准
+      if (isReady()) settle(true, bot)
+    }
+
+    /** 把监听器搬到“当前实例”上；实例没变就什么都不做 */
+    const attachCurrent = () => {
+      // 主动退出（disconnect）时不要顺手重连，安静等到超时即可
+      const current = bot || (manualQuit ? null : getBot())
+      if (current === attached) return
+      detach()
+      if (!current) return
+      attached = current
+      current.once('spawn', onSpawn)
+    }
+
+    attachCurrent() // 先同步挂一次，避免创建 Promise 后白等一个轮询周期
+
+    poll = setInterval(() => {
+      if (settled) return
+      if (isReady()) {
+        settle(true, bot)
+        return
+      }
+      attachCurrent() // 重连换了实例 → 监听器跟着搬
+    }, SPAWN_POLL_MS)
+
+    timer = setTimeout(() => {
+      settle(false, new Error(`等待机器人进入游戏超时（${timeout}ms），请检查服务器是否已启动`))
+    }, timeout)
   })
 }
 
@@ -216,5 +415,9 @@ module.exports = {
   disconnect,
   interruptBotActions,
   onDeath,
+  onCritical,
+  checkCritical, // 单测 / 立即巡检用
+  getVersionCheck,
+  runVersionCheck, // 允许测试/诊断手动触发
   MC_CONFIG
 }

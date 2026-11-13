@@ -187,7 +187,16 @@ const itemNameMap = {
   fermented_spider_eye: '发酵蜘蛛眼',
   sugar: '糖',
   glowstone_dust: '荧石粉',
-  redstone_dust: '红石粉'
+  redstone_dust: '红石粉',
+  // ---- 常见掉落物（entity / loot 查询会用到） ----
+  gunpowder: '火药',
+  string: '线',
+  rabbit: '生兔肉',
+  slime_ball: '黏液球',
+  ender_pearl: '末影珍珠',
+  prismarine_shard: '海晶碎片',
+  ink_sac: '墨囊',
+  nether_star: '下界之星'
 }
 
 /** 常见实体中文名（战斗/感知工具的返回文案用） */
@@ -235,6 +244,110 @@ const entityNameMap = {
 }
 
 // ============================================================================
+//  Wiki 实时检索（query_type = wiki）—— 本项目唯一会联网的地方
+// ----------------------------------------------------------------------------
+//  为什么需要它：minecraft-data 只有“物体数据”，没有“机制知识”。
+//  “怎么附魔 / 怎么驯服猫 / 下界怎么去”这类问题查表永远查不到，
+//  只能靠模型记忆 —— 于是就有幻觉。这里直接把 wiki 的搜索摘要喂给模型。
+//
+//  设计约束（刻意保持轻量）：
+//    · 只调 MediaWiki 的 list=search，不抓正文、不做切片、不算向量；
+//    · 只取前 3 条摘要，拼成 500 字以内，避免把上下文撑爆；
+//    · 失败绝不抛异常：超时/断网都返回一句人话，让模型降级回答并标注“经验判断”；
+//    · 10 分钟内存缓存，同一关键词连问 5 次只发 1 个请求。
+// ============================================================================
+const WIKI_API = 'https://minecraft.wiki/api.php'
+const WIKI_LIMIT = 3
+const WIKI_TIMEOUT_MS = Number(process.env.WIKI_TIMEOUT || 8000)
+const WIKI_MAX_CHARS = 500
+const WIKI_CACHE_TTL = 10 * 60 * 1000
+const WIKI_CACHE = new Map()
+
+/** HTML 实体 → 普通字符（Wiki 摘要里出现频率最高的是 &quot; 和 &amp;） */
+function decodeHtmlEntities(text) {
+  return String(text)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+}
+
+/** Wiki 的 snippet 带 <span class="searchmatch"> 高亮，必须去标签再压缩空白 */
+function stripHtml(text) {
+  return decodeHtmlEntities(String(text).replace(/<[^>]*>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * 检索 minecraft.wiki，返回一段可直接塞进 role:tool 的纯文本。
+ * 永不抛异常：任何失败都降级成“检索失败 + 建议”。
+ *
+ * @param {string} keyword 检索词（中文/英文都行，英文命中率更高）
+ * @returns {Promise<string>}
+ */
+async function searchMinecraftWiki(keyword) {
+  const key = String(keyword || '').trim()
+  if (!key) return '缺少检索关键词：请传具体机制名，例如 附魔、驯服猫、下界。'
+
+  const cached = WIKI_CACHE.get(key)
+  if (cached && Date.now() - cached.at < WIKI_CACHE_TTL) return cached.text
+
+  const url =
+    `${WIKI_API}?action=query&list=search&srsearch=${encodeURIComponent(key)}` +
+    `&srlimit=${WIKI_LIMIT}&format=json&utf8=1`
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), WIKI_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        // MediaWiki 对没有 UA 的请求不友好，显式带一个
+        'User-Agent': 'mc-agent-bot/1.0 (local Minecraft agent)',
+        Accept: 'application/json'
+      }
+    })
+
+    if (!res.ok) {
+      log('WARN', `[tools] Wiki 检索返回 HTTP ${res.status}`)
+      return `Wiki 检索失败：HTTP ${res.status}。可以先按已有知识给出经验性回答，但必须说明“这是经验判断，不是查到的资料”。`
+    }
+
+    const data = await res.json()
+    const hits = data && data.query && Array.isArray(data.query.search) ? data.query.search : []
+
+    if (hits.length === 0) {
+      const text = `minecraft.wiki 上没有找到与 "${key}" 相关的条目。建议换更标准的关键词（英文条目更全，例如 enchanting、cat、nether）。`
+      WIKI_CACHE.set(key, { at: Date.now(), text })
+      return text
+    }
+
+    const blocks = hits.map((hit, index) => {
+      const title = stripHtml(hit.title) || '(无标题)'
+      const snippet = stripHtml(hit.snippet) || '(无摘要)'
+      return `${index + 1}. ${title}：${snippet}`
+    })
+
+    let text = `【Wiki 检索：${key}】（来源 minecraft.wiki，实时抓取，共 ${hits.length} 条）\n${blocks.join('\n')}`
+    if (text.length > WIKI_MAX_CHARS) text = text.slice(0, WIKI_MAX_CHARS) + '…'
+
+    WIKI_CACHE.set(key, { at: Date.now(), text })
+    log('TOOL', `[tools] Wiki 检索命中 ${hits.length} 条：${key}`)
+    return text
+  } catch (err) {
+    const reason = err && err.name === 'AbortError' ? `超时（${WIKI_TIMEOUT_MS}ms）` : describeError(err)
+    log('WARN', `[tools] Wiki 检索失败：${reason}`)
+    return `Wiki 检索失败（${reason}）。可以先按已有知识给出经验性回答，但必须说明“这是经验判断，不是查到的资料”。`
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// ============================================================================
 //  游戏知识查询（query_game_knowledge）—— minecraft-data 深度集成
 // ----------------------------------------------------------------------------
 //  数据来源：require('minecraft-data')(bot.version)
@@ -253,26 +366,59 @@ const minecraftData = require('minecraft-data')
 /** 单个配方最多展示几个方案（石镐有 3 种材料方案，全列会把上下文撑爆） */
 const MAX_RECIPE_VARIANTS = 3
 
-/** 熔炼表（产物 → 原料）：minecraft-data 不提供，内置常用项兜底 */
+/**
+ * 熔炼表（产物 → 原料候选）：minecraft-data 不提供熔炉配方，内置兜底。
+ *
+ * ⚠️ 每条给的是**候选数组**而不是单一答案，因为版本差异非常大：
+ *    · 1.12.2 没有 raw_iron，铁矿石直接烧成铁锭，也没有 raw_gold；
+ *    · 1.16.5 有 raw_iron 但没有 raw_gold；
+ *    · 1.20+ 才有 raw_gold。
+ * 使用前必须用 resolveSmeltSources(mcData, name) 按**当前版本**做存在性过滤，
+ * 不存在的原料直接跳过（不是报错），过滤后为空就当作“该版本没有熔炼路径”。
+ */
 const SMELTING_RECIPES = {
-  iron_ingot: 'raw_iron',
-  gold_ingot: 'raw_gold',
-  copper_ingot: 'raw_copper',
-  glass: 'sand',
-  stone: 'cobblestone',
-  smooth_stone: 'stone',
-  charcoal: 'oak_log',
-  brick: 'clay_ball',
-  deepslate: 'cobbled_deepslate',
-  cooked_beef: 'beef',
-  cooked_porkchop: 'porkchop',
-  cooked_chicken: 'chicken',
-  cooked_mutton: 'mutton',
-  cooked_rabbit: 'rabbit',
-  cooked_cod: 'cod',
-  cooked_salmon: 'salmon',
-  baked_potato: 'potato',
-  dried_kelp: 'kelp'
+  iron_ingot: ['raw_iron', 'iron_ore'],
+  gold_ingot: ['raw_gold', 'gold_ore'],
+  copper_ingot: ['raw_copper', 'copper_ore'],
+  glass: ['sand'],
+  stone: ['cobblestone'],
+  smooth_stone: ['stone'],
+  charcoal: ['oak_log', 'log'],
+  brick: ['clay_ball'],
+  deepslate: ['cobbled_deepslate'],
+  netherite_scrap: ['ancient_debris'],
+  cooked_beef: ['beef'],
+  cooked_porkchop: ['porkchop'],
+  cooked_chicken: ['chicken'],
+  cooked_mutton: ['mutton'],
+  cooked_rabbit: ['rabbit'],
+  cooked_cod: ['cod'],
+  cooked_salmon: ['salmon'],
+  baked_potato: ['potato'],
+  dried_kelp: ['kelp']
+}
+
+/** 当前版本是否存在该物品/方块（所有跨版本查询的唯一判据） */
+function itemExists(mcData, name) {
+  if (!name) return false
+  const inItems = Boolean(mcData.itemsByName && mcData.itemsByName[name])
+  const inBlocks = Boolean(mcData.blocksByName && mcData.blocksByName[name])
+  return inItems || inBlocks
+}
+
+/** 熔炼原料候选 → 只保留当前版本真实存在的那些 */
+function resolveSmeltSources(mcData, itemName) {
+  const list = SMELTING_RECIPES[itemName]
+  if (!list) return []
+  const candidates = Array.isArray(list) ? list : [list]
+  return candidates.filter((name) => itemExists(mcData, name))
+}
+
+/** 版本展示文本：1.12.2 / 1.20.4 …（数据缺失时返回“未知”） */
+function versionLabelOf(mcData) {
+  if (!mcData || mcData.error) return '未知'
+  const version = mcData.version || {}
+  return String(version.minecraftVersion || version.version || '未知')
 }
 
 /** 版本 → mcData 缓存：同一版本只解析一次（数据文件不小，反复加载会明显卡顿） */
@@ -295,6 +441,15 @@ function getGameData(bot) {
 
   try {
     const data = minecraftData(version)
+    // minecraft-data 对不认识的版本会返回 **null** 而不是抛错（例如模组服乱报版本号），
+    // 不判空的话后面 mcData.itemsByName 会直接把 Agent 打挂。
+    if (!data) {
+      const error =
+        `当前版本（v${version}）不在 minecraft-data 的支持列表里，知识查询不可用。` +
+        '可以在 .env 里用 MC_VERSION 指定一个相近的原版版本（例如 1.20.4）。'
+      log('ERROR', `[tools] getGameData ${error}`)
+      return { error }
+    }
     MC_DATA_CACHE.set(version, data)
     return data
   } catch (err) {
@@ -338,6 +493,255 @@ function lookupGameItem(mcData, keyword) {
   }
 }
 
+// ============================================================================
+//  实体与掉落（query_type = entity / loot）
+// ----------------------------------------------------------------------------
+//  数据来源：
+//    · mcData.entitiesByName —— 实体 ID、分类、体型（**没有血量字段**）
+//    · mcData.entityLoot[name].drops —— 掉落物 / 概率 / 数量区间 / 是否仅玩家击杀
+//    · mcData.blockLoot[name].drops  —— 方块掉落，带 silkTouch / noSilkTouch 标记
+//  两个坑：
+//    1) minecraft-data 不提供生物血量，只能靠 MOB_HEALTH 兜底（标注为“攻略常识”），
+//       没收录的物种如实说“未收录”，绝不编一个数字。
+//    2) blockLoot 里的 dropChance 0.5 + silkTouch/noSilkTouch 并不代表 50% 概率，
+//       它表示“精准采集掉 A / 普通挖掘掉 B”这一对分支，不能按百分比展示。
+// ============================================================================
+
+/** 常见生物基础血量（minecraft-data 无此字段，攻略常识表；不在表里就说未收录） */
+const MOB_HEALTH = {
+  allay: 20,
+  axolotl: 14,
+  bat: 6,
+  bee: 10,
+  blaze: 20,
+  camel: 32,
+  cat: 10,
+  cave_spider: 12,
+  chicken: 4,
+  cod: 3,
+  cow: 10,
+  creeper: 20,
+  dolphin: 10,
+  donkey: 15,
+  drowned: 20,
+  elder_guardian: 80,
+  ender_dragon: 200,
+  enderman: 40,
+  endermite: 8,
+  evoker: 24,
+  fox: 10,
+  frog: 10,
+  ghast: 10,
+  glow_squid: 10,
+  goat: 10,
+  guardian: 30,
+  hoglin: 40,
+  husk: 20,
+  illusioner: 32,
+  iron_golem: 100,
+  llama: 30,
+  magma_cube: 16,
+  mooshroom: 10,
+  mule: 15,
+  ocelot: 10,
+  panda: 20,
+  parrot: 6,
+  phantom: 20,
+  pig: 10,
+  piglin: 16,
+  piglin_brute: 50,
+  pillager: 24,
+  polar_bear: 30,
+  pufferfish: 3,
+  rabbit: 3,
+  ravager: 100,
+  salmon: 3,
+  sheep: 8,
+  shulker: 30,
+  silverfish: 8,
+  skeleton: 20,
+  skeleton_horse: 15,
+  slime: 16,
+  snow_golem: 4,
+  spider: 16,
+  squid: 10,
+  stray: 20,
+  strider: 20,
+  trader_llama: 30,
+  tropical_fish: 3,
+  turtle: 30,
+  vex: 14,
+  villager: 20,
+  vindicator: 24,
+  wandering_trader: 20,
+  warden: 500,
+  witch: 26,
+  wither: 300,
+  wither_skeleton: 20,
+  wolf: 8,
+  zoglin: 40,
+  zombie: 20,
+  zombie_villager: 20,
+  zombified_piglin: 20
+}
+
+/** 血量会随体型/状态变化的生物，补一句说明 */
+const MOB_HEALTH_NOTE = {
+  slime: '（大型 16，随体型变化）',
+  magma_cube: '（大型 16，随体型变化）',
+  wolf: '（野生 8，驯服后 20）',
+  llama: '（普通 15，商队羊驼 30）',
+  horse: '（15 ~ 30，按个体）'
+}
+
+/** 统一展示名：“中文(english_id)”，没有中文映射就只给 ID */
+function labelOf(name) {
+  const zh = itemNameMap[name] || entityNameMap[name]
+  return zh ? `${zh}(${name})` : String(name)
+}
+
+/**
+ * 在 mcData 里找实体。容忍：大小写、连字符/空格、中文名反查。
+ * @returns {{name:string, displayName:string, category:string, type:string, width:number, height:number}|null}
+ */
+function lookupGameEntity(mcData, keyword) {
+  const raw = String(keyword || '').trim()
+  if (!raw) return null
+
+  const id = raw.toLowerCase().replace(/^minecraft:/, '').replace(/[\s-]+/g, '_')
+  let name = id
+
+  if (!mcData.entitiesByName || !mcData.entitiesByName[name]) {
+    const zhHit = Object.entries(entityNameMap).find(([, zh]) => zh === raw)
+    if (!zhHit) return null
+    name = zhHit[0]
+  }
+
+  const entity = mcData.entitiesByName && mcData.entitiesByName[name]
+  if (!entity) return null
+
+  return {
+    name: entity.name,
+    displayName: entity.displayName || entity.name,
+    category: entity.category || '未知分类',
+    type: entity.type || 'unknown',
+    width: entity.width,
+    height: entity.height
+  }
+}
+
+/** 掉落概率 → 人话（0.00833 显示成 0.8%，而不是 0.8333333333%） */
+function describeChance(chance) {
+  if (!Number.isFinite(chance) || chance >= 0.999) return '必掉'
+  const percent = chance * 100
+  return percent >= 1 ? `约 ${Math.round(percent)}%` : `约 ${percent.toFixed(1)}%`
+}
+
+/** 数量区间 → x1 / x1~2 */
+function describeAmount(range) {
+  const min = Array.isArray(range) ? range[0] : 1
+  const max = Array.isArray(range) ? range[1] : min
+  const lo = Number.isFinite(min) ? min : 1
+  const hi = Number.isFinite(max) ? max : lo
+  return lo === hi ? `x${lo}` : `x${lo}~${hi}`
+}
+
+/** 实体掉落文本 */
+function formatEntityLoot(mcData, entityName) {
+  const entry = mcData.entityLoot && mcData.entityLoot[entityName]
+  if (!entry) return '（minecraft-data 没有收录这个生物的掉落表）'
+
+  const drops = Array.isArray(entry.drops) ? entry.drops : []
+  if (drops.length === 0) {
+    return '（掉落表为空：这个生物通常不掉落物品，或掉落由特殊机制处理）'
+  }
+
+  return drops
+    .map((drop) => {
+      const extra = drop.playerKill ? '，仅玩家击杀' : ''
+      return `${labelOf(drop.item)} ${describeChance(drop.dropChance)}（${describeAmount(drop.stackSizeRange)}${extra}）`
+    })
+    .join('\n')
+}
+
+/** 方块掉落文本：把“精准采集 / 普通挖掘”两条分支分开展示 */
+function formatBlockLoot(mcData, blockInfo) {
+  const entry = mcData.blockLoot && mcData.blockLoot[blockInfo.name]
+
+  if (!entry || !Array.isArray(entry.drops) || entry.drops.length === 0) {
+    // 兜底：老版本只有 block.drops（物品 id 列表，没有概率信息）
+    const block = mcData.blocksByName[blockInfo.name]
+    const ids = block && Array.isArray(block.drops) ? block.drops : []
+    if (ids.length === 0) return '（minecraft-data 没有收录这个方块的掉落表）'
+    const names = ids.map((id) => (mcData.items[id] && mcData.items[id].name) || `unknown_${id}`)
+    return `掉落：${names.map(labelOf).join('、')}（旧版数据，无概率信息）`
+  }
+
+  const normal = []
+  const silk = []
+  const random = []
+
+  for (const drop of entry.drops) {
+    if (drop.silkTouch) silk.push(drop)
+    else if (drop.noSilkTouch) normal.push(drop)
+    else random.push(drop)
+  }
+
+  const lines = []
+  const fmt = (drop) => `${labelOf(drop.item)} ${describeAmount(drop.stackSizeRange)}`
+
+  if (normal.length > 0) lines.push(`普通挖掘：${normal.map(fmt).join('、')}`)
+  if (silk.length > 0) lines.push(`精准采集：${silk.map(fmt).join('、')}`)
+  if (random.length > 0) {
+    lines.push(
+      `概率掉落：${random
+        .map((drop) => `${labelOf(drop.item)} ${describeChance(drop.dropChance)}（${describeAmount(drop.stackSizeRange)}）`)
+        .join('、')}`
+    )
+  }
+
+  return lines.join('\n')
+}
+
+/** 分支 B：实体信息文本（血量 + 分类 + 体型 + 掉落） */
+function formatEntityInfo(mcData, entity) {
+  const health = MOB_HEALTH[entity.name]
+  const note = MOB_HEALTH_NOTE[entity.name] || ''
+  const healthText = health ? `${health}/20${note}` : '未收录（minecraft-data 不提供血量字段）'
+  const size =
+    Number.isFinite(entity.width) && Number.isFinite(entity.height)
+      ? `${entity.width} × ${entity.height} 格`
+      : '未知'
+
+  return (
+    `生物：${labelOf(entity.name)}\n` +
+    `类别：${entity.category}\n` +
+    `基础血量：${healthText}\n` +
+    `体型：${size}\n` +
+    `掉落：\n${formatEntityLoot(mcData, entity.name)}`
+  )
+}
+
+/** 分支 C：方块/生物掉落文本（先按方块查，查不到再当成生物） */
+function formatLootInfo(mcData, keyword) {
+  const blockInfo = lookupGameItem(mcData, keyword)
+
+  if (blockInfo && mcData.blocksByName[blockInfo.name]) {
+    return (
+      `方块：${labelOf(blockInfo.name)}\n` +
+      `硬度：${mcData.blocksByName[blockInfo.name].hardness ?? '未知'}\n` +
+      `掉落：\n${formatBlockLoot(mcData, blockInfo)}`
+    )
+  }
+
+  const entity = lookupGameEntity(mcData, keyword)
+  if (entity) {
+    return `生物：${labelOf(entity.name)}\n掉落：\n${formatEntityLoot(mcData, entity.name)}`
+  }
+
+  return null
+}
+
 /** 分支 A：物品属性文本 */
 function formatItemInfo(info) {
   const zh = itemNameMap[info.name]
@@ -348,6 +752,18 @@ function formatItemInfo(info) {
   return `物品：${label}\n最大堆叠：${info.stackSize}\n${durability}`
 }
 
+/** 格子里的“未知物品”占位：前端会直接显示文字，不去拼贴图 URL */
+const UNKNOWN_ITEM = '未知物品'
+
+/** 数字 id → 名字；当前版本数据里没有就返回空串（由调用方决定怎么兜底） */
+function nameById(mcData, id) {
+  if (id == null) return ''
+  const item = mcData.items && mcData.items[id]
+  if (item && item.name) return item.name
+  const block = mcData.blocks && mcData.blocks[id]
+  return block && block.name ? block.name : ''
+}
+
 /** 3x3 有序合成表：**严格 Markdown**，第一行当表头，紧跟分隔行，空位填“空” */
 function renderShapeTable(mcData, inShape) {
   const rows = []
@@ -355,7 +771,9 @@ function renderShapeTable(mcData, inShape) {
     const cells = []
     for (let c = 0; c < 3; c++) {
       const id = Array.isArray(inShape[r]) ? inShape[r][c] : null
-      cells.push(id == null ? '空' : (mcData.items[id] && mcData.items[id].name) || `unknown_${id}`)
+      // 版本不匹配 / 模组配方会出现“id 对不上名字”的情况：
+      // 这里绝不把 unknown_123 这种假 ID 丢给前端（拼不出图标还会误导模型），统一写“未知物品”
+      cells.push(id == null ? '空' : nameById(mcData, id) || UNKNOWN_ITEM)
     }
     rows.push(`| ${cells.join(' | ')} |`)
   }
@@ -366,7 +784,7 @@ function renderShapeTable(mcData, inShape) {
 function formatIngredients(mcData, ingredients) {
   const counts = new Map()
   for (const id of ingredients) {
-    const name = (mcData.items[id] && mcData.items[id].name) || `unknown_${id}`
+    const name = nameById(mcData, id) || UNKNOWN_ITEM
     counts.set(name, (counts.get(name) || 0) + 1)
   }
   return [...counts.entries()].map(([name, count]) => `${name} x${count}`).join(', ')
@@ -460,12 +878,14 @@ function formatRecipeMarkdown(mcData, info) {
   const shapeless = recipes.filter(
     (recipe) => Array.isArray(recipe.ingredients) && !Array.isArray(recipe.inShape)
   )
-  const smeltInput = SMELTING_RECIPES[info.name]
+  // 熔炼原料必须按当前版本过滤：1.12.2 没有 raw_iron，直接跳过而不是报错
+  const smeltSources = resolveSmeltSources(mcData, info.name)
+  const version = versionLabelOf(mcData)
 
-  if (shaped.length === 0 && shapeless.length === 0 && !smeltInput) {
+  if (shaped.length === 0 && shapeless.length === 0 && smeltSources.length === 0) {
     return (
-      `没有找到 ${info.name} 的合成配方：它可能需要熔炼、交易、怪物掉落，` +
-      '或在特定结构（村庄/要塞/沉船）里获取。'
+      `当前版本（v${version}）里 ${info.name} 没有合成/熔炼配方：` +
+      '它可能需要交易、怪物掉落，或在特定结构（村庄/要塞/沉船）里获取。'
     )
   }
 
@@ -511,7 +931,10 @@ function formatRecipeMarkdown(mcData, info) {
     )
   })
 
-  if (smeltInput) blocks.push(`熔炉烧炼：放入 ${smeltInput}，产出 ${info.name}`)
+  if (smeltSources.length > 0) {
+    // 原料候选可能不止一个（1.20 的粗铁和铁矿石都能烧），按版本过滤后全部列出
+    blocks.push(`熔炉烧炼：放入 ${smeltSources.join(' 或 ')}，产出 ${info.name}`)
+  }
 
   return [`合成配方：${title}`, blocks.join('\n\n')].join('\n')
 }
@@ -519,33 +942,81 @@ function formatRecipeMarkdown(mcData, info) {
 /**
  * query_game_knowledge 主实现（同步，纯查表，不产生任何副作用）。
  *
- * 输入：`{ query_type: 'item' | 'recipe', keyword: 英文ID或中文名 }`
+ * 输入：`{ query_type: 'item' | 'recipe' | 'entity' | 'loot' | 'wiki', keyword: 英文ID或中文名 }`
  * 输出：`{ __raw: true, text }`
  *   · item   → 三行文本（物品名 / 最大堆叠 / 最大耐久）
  *   · recipe → 严格 Markdown（`产出：<id> x<n>` + 3x3 表格 + 可选替换说明）
+ *   · entity → 生物分类 / 基础血量 / 体型 / 掉落表
+ *   · loot   → 方块掉落（区分精准采集与普通挖掘）或生物掉落
+ *   · wiki   → 实时检索 minecraft.wiki，返回 3 条摘要（唯一会联网的分支）
  *
  * 为什么返回对象而不是裸字符串：`executeTool` 会对所有工具输出跑 localizeText，
  * 那会把表格里的 `cobblestone` 包成「圆石(cobblestone)」，前端就拼不出贴图 URL 了。
  * `__raw: true` 是“跳过汉化”的显式标记，改这个协议前先看 public/index.html 的解析逻辑。
  */
-function queryGameKnowledge(bot, args) {
+async function queryGameKnowledge(bot, args) {
   const queryType = String(args.query_type || '').trim().toLowerCase()
   const keyword = String(args.keyword || '').trim()
+
+  if (!keyword) {
+    return {
+      __raw: true,
+      text: '缺少 keyword：请传物品 / 方块 / 生物的英文 ID（例如 stone_pickaxe、iron_ore、zombie）。'
+    }
+  }
+
+  // ---- Wiki：唯一不依赖 minecraft-data 的分支（机制、攻略、版本内容） ----
+  //   放在最前面：即使游戏数据加载失败，机制类问题也应该能查。
+  if (queryType === 'wiki') {
+    log('TOOL', `[tools] query_game_knowledge：wiki ${keyword}`)
+    return { __raw: true, text: await searchMinecraftWiki(keyword) }
+  }
 
   const mcData = getGameData(bot)
   if (mcData.error) return { __raw: true, text: mcData.error }
 
-  if (!keyword) {
-    return { __raw: true, text: '缺少 keyword：请传物品的英文 ID（例如 stone_pickaxe）。' }
+  // 所有“查不到”的提示都带上真实版本号，玩家一眼能判断是版本问题还是拼写问题
+  const version = versionLabelOf(mcData)
+
+  // ---- 实体：分类 / 血量 / 体型 / 掉落 ----
+  if (queryType === 'entity') {
+    const entity = lookupGameEntity(mcData, keyword)
+    if (!entity) {
+      return {
+        __raw: true,
+        text:
+          `当前版本（v${version}）未找到生物 "${keyword}"，可能是模组生物或该版本不存在。` +
+          'keyword 用英文 ID（zombie、creeper）或中文名（僵尸）；如果问的是方块，请把 query_type 换成 loot。'
+      }
+    }
+    log('TOOL', `[tools] query_game_knowledge：entity ${entity.name}`)
+    return { __raw: true, text: formatEntityInfo(mcData, entity) }
   }
 
+  // ---- 掉落：先按方块查，查不到再当成生物查 ----
+  if (queryType === 'loot') {
+    const text = formatLootInfo(mcData, keyword)
+    if (!text) {
+      return {
+        __raw: true,
+        text:
+          `当前版本（v${version}）未找到 "${keyword}" 的掉落信息，可能是模组物品或该版本不存在。` +
+          'keyword 用英文 ID（iron_ore、zombie）或中文名（铁矿石、僵尸）；' +
+          '如果问的是生物信息（血量/分类），请把 query_type 换成 entity。'
+      }
+    }
+    log('TOOL', `[tools] query_game_knowledge：loot ${keyword}`)
+    return { __raw: true, text }
+  }
+
+  // ---- 物品属性 / 配方：需要先解析到具体物品 ----
   const info = lookupGameItem(mcData, keyword)
   if (!info) {
     return {
       __raw: true,
       text:
-        `找不到物品 "${keyword}"。keyword 必须是英文 ID（例如 stone_pickaxe、oak_planks），` +
-        '不能填中文名，也不要用方块的中文译名。'
+        `当前版本（v${version}）未找到该物品或配方 "${keyword}"，可能是模组物品或该版本不存在。` +
+        'keyword 必须是英文 ID（stone_pickaxe、oak_planks），不能填方块的中文译名。'
     }
   }
 
@@ -561,8 +1032,65 @@ function queryGameKnowledge(bot, args) {
 
   return {
     __raw: true,
-    text: `query_type 只能是 item 或 recipe，收到的是 "${args.query_type}"。`
+    text: `query_type 只能是 item、recipe、entity、loot、wiki，收到的是 "${args.query_type}"。`
   }
+}
+
+// ============================================================================
+//  启动版本自检（Sanity Check）
+// ----------------------------------------------------------------------------
+//  为什么需要：minecraft-data 的版本号来自握手包，一旦 bot.version 识别错
+//  （或服务端是模组服、版本对不上），后续所有查询都会静默返回空结果 ——
+//  模型只会以为“世界上没有铁矿石”，然后开始瞎猜。
+//
+//  做法：用几组带别名的核心物品探针（1.12.2 没有 oak_log，只有 log），
+//  只要有一组全体缺失，或该版本连配方表都是空的，就判定数据异常。
+// ============================================================================
+const CORE_VERSION_PROBES = [
+  { label: '橡木原木', names: ['oak_log', 'log'] },
+  { label: '石镐', names: ['stone_pickaxe'] },
+  { label: '铁矿石', names: ['iron_ore'] },
+  { label: '工作台', names: ['crafting_table'] },
+  { label: '熔炉', names: ['furnace'] }
+]
+
+/**
+ * 校验“当前连接版本的游戏数据是否可用”。
+ * 纯查询、无副作用，可以在 spawn 时反复调用。
+ *
+ * @param {object} bot
+ * @returns {{ok: boolean, version: string, missing: string[], recipeCount: number, reason: string, checkedAt: number}}
+ */
+function verifyGameData(bot) {
+  const version = resolveGameVersion(bot)
+  const checkedAt = Date.now()
+
+  const mcData = getGameData(bot)
+  if (mcData.error) {
+    return {
+      ok: false,
+      version,
+      missing: CORE_VERSION_PROBES.map((probe) => probe.label),
+      recipeCount: 0,
+      reason: mcData.error,
+      checkedAt
+    }
+  }
+
+  const missing = CORE_VERSION_PROBES.filter(
+    (probe) => !probe.names.some((name) => itemExists(mcData, name))
+  ).map((probe) => probe.label)
+
+  const recipeCount = mcData.recipes ? Object.keys(mcData.recipes).length : 0
+  const ok = missing.length === 0 && recipeCount > 0
+
+  const reason = ok
+    ? ''
+    : missing.length > 0
+      ? `核心物品缺失：${missing.join('、')}`
+      : '该版本没有任何配方数据'
+
+  return { ok, version, missing, recipeCount, reason, checkedAt }
 }
 
 module.exports = {
@@ -571,10 +1099,21 @@ module.exports = {
   entityNameMap,
   // 知识查询
   queryGameKnowledge,
+  searchMinecraftWiki,
+  stripHtml,
+  verifyGameData,
+  versionLabelOf,
+  resolveSmeltSources,
+  UNKNOWN_ITEM,
   // 以下仅诊断/单测用
   formatItemInfo,
   formatRecipeMarkdown,
+  formatEntityInfo,
+  formatLootInfo,
+  formatEntityLoot,
+  formatBlockLoot,
   lookupGameItem,
+  lookupGameEntity,
   getGameData,
   resolveGameVersion
 }

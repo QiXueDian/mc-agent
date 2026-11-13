@@ -27,10 +27,15 @@ require('dotenv').config()
 
 const OpenAI = require('openai')
 
-const { toolDefinitions, executeTool } = require('./tools')
+const { toolDefinitions, executeTool, labelName } = require('./tools')
 const { getBot, onDeath, interruptBotActions } = require('../bot/connection')
 const { log, sleep, describeError, cleanContent, hasSpecialToken } = require('./utils')
-const { readSurvivalState, formatSurvivalLine, buildSurvivalAlert } = require('./survival')
+const {
+  readSurvivalState,
+  formatSurvivalLine,
+  formatPanelLine,
+  buildSurvivalAlert
+} = require('./survival')
 const {
   safeParseArgs,
   callSignature,
@@ -38,7 +43,7 @@ const {
   looksLikeToolText,
   parsePseudoToolCalls
 } = require('./protocol')
-const { sanitizeHistory, attachSurvivalLine } = require('./history')
+const { sanitizeHistory, attachStatusLine } = require('./history')
 
 // ------------------------------ 1. 配置 ------------------------------
 const AI_CONFIG = {
@@ -49,8 +54,14 @@ const AI_CONFIG = {
   timeout: Number(process.env.AI_TIMEOUT || 120000)
 }
 
-/** ReAct 最大步数（防止模型反复调用同一工具） */
-const MAX_STEPS = Number(process.env.MAX_STEPS || 8)
+/**
+ * ReAct 最大步数（防止模型反复调用同一工具）。
+ *
+ * 默认 15：像“做一把铁镐”这种长链任务（砍树 → 木板 → 木棍 → 木镐 → 挖石 → 石镐 →
+ * 挖铁 → 熔炉 → 烧铁 → 铁镐）本身就要 8~12 步，8 步会在中途夭折。
+ * 真正的防死循环靠下面的护栏（同参数连续调用），而不是靠步数硬卡。
+ */
+const MAX_STEPS = Number(process.env.MAX_STEPS || 15)
 
 /** 防死循环护栏：连续相同调用第 2 次警告，第 3 次强制终止 */
 const GUARD_WARN_AT = 2
@@ -64,7 +75,7 @@ const LOOP_WARNING_TEXT =
 /** 格式错误时注入给模型的纠错提示（role: user，兼容性最好） */
 const TOOL_FORMAT_CORRECTION = '格式错误，请使用标准的 tool_calls 功能，不要在正文输出特殊标签。'
 
-/** 同一轮内允许的纠错次数；超过即熔断，避免把 8 步配额全耗在“重写格式”上 */
+/** 同一轮内允许的纠错次数；超过即熔断，避免把步数配额全耗在“重写格式”上 */
 const MAX_RECOVERY = Number(process.env.MAX_RECOVERY || 2)
 
 /** 格式彻底错乱时的兜底话术（前端 done 事件只显示这一句） */
@@ -83,6 +94,16 @@ const WRAP_UP_SAFE_TEXT =
  * 刻意不返回“半截结果”：被中断的任务往往只做了一半，写进多轮记忆会污染后续推理。
  */
 const USER_ABORT_TEXT = '（任务已被用户取消）'
+
+/**
+ * 危急中断的标记文本。
+ * server.js 的“痛觉神经”回调通过 controller.abort(带此标记的字符串) 打断循环，
+ * 循环据此区分「用户点了停止」与「机器人快死了」——两者收尾话术不同。
+ */
+const CRITICAL_ABORT_TAG = '【紧急中断】'
+
+/** 被危急中断时的固定答复：写进多轮记忆后，模型能知道上一轮是被危险打断的 */
+const CRITICAL_ABORT_TEXT = '（任务已因致命危险被强制中断，已转入保命模式）'
 
 /** 死亡后注入的系统通知：让模型知道“进度全废、自己在重生点” */
 const DEATH_NOTICE_TEXT =
@@ -104,8 +125,7 @@ const ACTIVE_PERSONA = isPersona(process.env.AGENT_PERSONA)
   ? String(process.env.AGENT_PERSONA).trim().toLowerCase()
   : DEFAULT_PERSONA
 
-/** 默认系统提示词（保留同名导出，server.js / brain.js 一行都不用改） */
-const SYSTEM_PROMPT = getSystemPrompt(ACTIVE_PERSONA)
+
 
 // ------------------------------ 2. 大模型客户端（懒加载） ------------------------------
 let client = null
@@ -154,8 +174,8 @@ async function runAgent(userMessage, sendSSE, options = {}) {
     shouldStop = () => false,
     bot = null,
     history = [],
-    // 人格提示词：默认取当前人格（幽默的赛博打工人），可由 server.js 按请求覆盖
-    systemPrompt = SYSTEM_PROMPT
+    // 人格提示词：默认留空，等拿到 bot 后用「当前人格 + 当前连接版本」现场拼一份
+    systemPrompt = ''
   } = options
 
   // 统一的推送包装：SSE 通道异常不应该影响 Agent 循环本身
@@ -181,10 +201,40 @@ async function runAgent(userMessage, sendSSE, options = {}) {
 
   const botInstance = bot || getBot()
 
+  // 提示词里的“版本意识”必须准：优先用显式传入的 systemPrompt，
+  // 否则用当前人格 + bot.version 现场拼一份（模块加载时的 SYSTEM_PROMPT 拿不到版本）。
+  const effectiveSystemPrompt =
+    systemPrompt ||
+    getSystemPrompt(ACTIVE_PERSONA, {
+      version: (botInstance && botInstance.version) || process.env.MC_VERSION || ''
+    })
+
   // ---- 5.0 中断信号与死亡监听 ----
   // signal 由 server.js 的 AbortController 提供；不传时退化为纯 shouldStop 模式（CLI 用）。
   const signal = options.signal || null
   const isAborted = () => Boolean(signal && signal.aborted === true)
+
+  /**
+   * 取出中断原因（只在 server.js 主动传入字符串时有效）。
+   * controller.abort() 不带参数时 reason 是 DOMException，这里用 typeof 过滤掉，
+   * 避免把 "This operation was aborted" 这种英文内部信息喂给模型/用户。
+   */
+  const abortReason = () => {
+    const reason = signal ? signal.reason : null
+    return typeof reason === 'string' ? reason : ''
+  }
+
+  /**
+   * 极简状态面板：贴在**每一条** tool 结果末尾。
+   * 目的：模型每次思考前都先“看见血条”，而不是等下一次巡检才发现自己快死了。
+   */
+  const statusLine = () => {
+    const held = botInstance && botInstance.heldItem ? labelName(botInstance.heldItem.name) : ''
+    return formatPanelLine(readSurvivalState(botInstance), held)
+  }
+
+  /** 给工具结果强制挂状态面板（即使是“寻路完成”这种平淡结果也照挂） */
+  const withStatus = (text) => `${text}\n${statusLine()}`
 
   // 死亡信息先落到本地变量，等**下一次步开始时**才动上下文 ——
   // 那两个请求之间是唯一安全的边界：此时上一条 tool 消息已配对完整，
@@ -208,7 +258,7 @@ async function runAgent(userMessage, sendSSE, options = {}) {
   // 跨轮保存会让 tool_call_id 对不上，接口会 400。
   const historyMessages = sanitizeHistory(history)
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: effectiveSystemPrompt },
     ...historyMessages,
     { role: 'user', content: instruction }
   ]
@@ -240,12 +290,16 @@ async function runAgent(userMessage, sendSSE, options = {}) {
       return finish(finalAnswer || '（客户端已断开连接，任务中止）')
     }
 
-    // 4.1.5 用户点了“停止生成”：先掐掉底层动作（寻路/挖掘），再退出
+    // 4.1.5 被中断：先掐掉底层动作（寻路/挖掘），再退出
+    //   中断有两种来源，收尾话术必须区分开：
+    //     · 用户点了“停止生成” / 发了新指令 → controller.abort()（无 reason）
+    //     · 痛觉神经发现残血/溺水/着火   → controller.abort('【紧急中断】…')
     if (isAborted()) {
       interruptBotActions()
-      tlog('AGENT', `第 ${step} 步检测到用户中断，终止任务`)
-      emit('warn', { step, text: '任务已被用户取消' })
-      return finish(USER_ABORT_TEXT)
+      const why = abortReason()
+      tlog('AGENT', `第 ${step} 步检测到中断${why ? `（${why}）` : '（用户取消）'}，终止任务`)
+      if (!why) emit('warn', { step, text: '任务已被用户取消' })
+      return finish(why ? `${CRITICAL_ABORT_TEXT}：${why}` : USER_ABORT_TEXT)
     }
 
     // 4.1.6 死亡：在“两个请求之间”这个安全边界重置上下文
@@ -276,12 +330,13 @@ async function runAgent(userMessage, sendSSE, options = {}) {
     tlog('LOOP', `=========== 第 ${step}/${maxSteps} 步思考 ===========`)
 
     // 4.2.0 生存巡检：每步请求前把真实生存状态喂给模型
-    //   常态 → 拼到最后一条 role:tool 消息末尾（不新增消息、不涨 token 条数）
-    //   危急 → 额外补一条 role:user 的硬指令（同一原因只推一次，避免 8 步刷 8 条）
+    //   常态 → 刷新最后一条 role:tool 消息末尾的状态面板（不新增消息、不涨 token 条数）
+    //   危急 → 额外补一条 role:user 的硬指令（同一原因只推一次，避免每步刷一条）
+    //   注意：面板是“就地刷新”而不是“追加”，否则同一条消息会叠出十几行状态。
     const survival = readSurvivalState(botInstance)
     if (survival.available) {
       const line = formatSurvivalLine(survival)
-      attachSurvivalLine(messages, line)
+      attachStatusLine(messages, statusLine())
       tlog('LOOP', `[SURVIVAL] ${line}`)
 
       if (survival.critical && survival.reason !== lastSurvivalReason) {
@@ -458,26 +513,33 @@ async function runAgent(userMessage, sendSSE, options = {}) {
           role: 'tool',
           tool_call_id: call.id,
           name: toolName,
-          content: LOOP_WARNING_TEXT
+          content: withStatus(LOOP_WARNING_TEXT)
         })
         continue
       }
       // ==================== 护栏结束，正常执行 ====================
 
-      // 用户中断：当前及后续每个 tool_call 都必须补占位消息，
+      // 中断：当前及后续每个 tool_call 都必须补占位消息，
       // 否则 assistant(tool_calls) 里会有“孤儿 call”，下一轮请求直接 400。
       if (isAborted()) {
         interruptBotActions()
+        const why = abortReason()
+        const notice = why
+          ? '本次调用未执行：检测到致命危险，任务已被强制中断。'
+          : '本次调用未执行：用户已取消任务。'
         for (let j = i; j < toolCalls.length; j++) {
           messages.push({
             role: 'tool',
             tool_call_id: toolCalls[j].id,
             name: toolCalls[j].function.name,
-            content: '本次调用未执行：用户已取消任务。'
+            content: notice
           })
         }
         abortedByUser = true
-        tlog('AGENT', `第 ${step} 步工具执行前被中断，已为剩余 ${toolCalls.length - i} 个调用补占位消息`)
+        tlog(
+          'AGENT',
+          `第 ${step} 步工具执行前被中断${why ? `（${why}）` : ''}，已为剩余 ${toolCalls.length - i} 个调用补占位消息`
+        )
         break
       }
 
@@ -504,15 +566,17 @@ async function runAgent(userMessage, sendSSE, options = {}) {
         role: 'tool',
         tool_call_id: call.id,
         name: toolName,
-        content: toolResult
+        // 状态面板强制附着：哪怕结果是“寻路完成”，模型下一次思考前也先看到血条/氧气
+        content: withStatus(toolResult)
       })
     }
 
-    // 工具执行期间被中断（比如 pathfinder 走到一半用户点了停止）
+    // 工具执行期间被中断（pathfinder 走到一半用户点了停止 / 痛觉神经发现溺水着火）
     if (abortedByUser || isAborted()) {
       interruptBotActions()
-      emit('warn', { step, text: '任务已被用户取消' })
-      return finish(USER_ABORT_TEXT)
+      const why = abortReason()
+      if (!why) emit('warn', { step, text: '任务已被用户取消' })
+      return finish(why ? `${CRITICAL_ABORT_TEXT}：${why}` : USER_ABORT_TEXT)
     }
 
     if (abortedByGuard) break
@@ -580,6 +644,8 @@ async function runAgent(userMessage, sendSSE, options = {}) {
 module.exports = {
   runAgent,
   ACTIVE_PERSONA,
+  // server.js 用它识别“这次 abort 是痛觉神经干的”
+  CRITICAL_ABORT_TAG,
   // 以下仅用于单元测试与诊断（test/dsml-guard.test.js 依赖前两个），不要在生产代码里依赖
   parsePseudoToolCalls,
   looksLikeToolText

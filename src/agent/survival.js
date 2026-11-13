@@ -106,6 +106,30 @@ function formatSurvivalLine(state) {
 }
 
 /**
+ * 极简状态面板（贴在**每一条** tool 结果末尾，让模型每次思考前都先看面板）。
+ *
+ * 与 formatSurvivalLine 的分工：
+ *   · 本函数：短、密、每步都用 —— `[当前状态: 血量 18/20 | 氧气 -- | 饥饿 15/20 | 手持 铁镐(iron_pickaxe)]`
+ *   · formatSurvivalLine：长、带坐标与判定原因 —— 只用于终端日志
+ *
+ * @param {object} state readSurvivalState 的返回值
+ * @param {string} [heldLabel] 手持物的展示名（由调用方用 labelName 生成，保持本文件零依赖）
+ */
+function formatPanelLine(state, heldLabel) {
+  if (!state || !state.available) return '[当前状态: 不可用（机器人可能未连接）]'
+
+  const health = state.health === null ? '--' : Math.round(state.health)
+  const food = state.food === null ? '--' : Math.round(state.food)
+  const oxygen = state.oxygen === null ? '--' : `${Math.round(state.oxygen)}/20`
+  const held = heldLabel || '空手'
+
+  const parts = [`血量 ${health}/20`, `氧气 ${oxygen}`, `饥饿 ${food}/20`, `手持 ${held}`]
+  if (state.critical) parts.push(`⚠️ 危急：${state.reason}`)
+
+  return `[当前状态: ${parts.join(' | ')}]`
+}
+
+/**
  * 危急时给模型的硬指令（由 loop.js 作为 role:user 注入，值变化时才注入，避免刷屏）。
  */
 function buildSurvivalAlert(state) {
@@ -122,5 +146,6 @@ module.exports = {
   CRITICAL_OXYGEN,
   readSurvivalState,
   formatSurvivalLine,
+  formatPanelLine,
   buildSurvivalAlert
 }
